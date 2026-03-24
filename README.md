@@ -7,7 +7,6 @@ This repository is public so anyone can review the source code or compile the mo
 ## Build
 
 Requires:
-- Windows
 - Visual Studio or Visual C++ Build Tools
 - Windows SDK
 - x64 Developer Command Prompt for Visual Studio
