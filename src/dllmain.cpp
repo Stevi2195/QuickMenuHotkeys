@@ -5,7 +5,7 @@
 #include <string>
 
 // ============================================================
-//  Quick Menu Hotkeys v1.3 — Cross-Reference Pattern Scanner
+//  Quick Menu Hotkeys v1.4 — Cross-Reference Pattern Scanner
 //
 //  Finds the OpenPanel function by cross-referencing multiple
 //  known panel name strings. The common CALL target across
@@ -44,6 +44,9 @@ static FILE* g_logFile = nullptr;
 static HMODULE g_hModule = nullptr;
 static HWND g_gameWindow = nullptr;
 static WNDPROC g_originalWndProc = nullptr;
+
+// Toggle tracking: which panel was last opened via hotkey (-1 = none)
+static volatile int g_currentPanel = -1;
 
 #define WM_OPEN_PANEL (WM_USER + 501)
 
@@ -544,10 +547,12 @@ static void OpenPanelOnGameThread(int panelIndex) {
 
     __try {
         openPanel(pm, panelName, dataPtr);
+        g_currentPanel = panelIndex;
     } __except(EXCEPTION_EXECUTE_HANDLER) {
         Log("ERROR: Panel call crashed (0x%08X) for '%s'",
             GetExceptionCode(), panelName);
         g_panelManager = 0;
+        g_currentPanel = -1;
     }
 }
 
@@ -560,6 +565,10 @@ static LRESULT CALLBACK HookedWndProc(HWND hwnd, UINT msg,
     if (msg == WM_OPEN_PANEL) {
         OpenPanelOnGameThread((int)wParam);
         return 0;
+    }
+    // Reset panel tracking when user closes a menu with ESC
+    if (msg == WM_KEYDOWN && wParam == VK_ESCAPE) {
+        g_currentPanel = -1;
     }
     return CallWindowProcA(g_originalWndProc, hwnd, msg, wParam, lParam);
 }
@@ -614,7 +623,26 @@ static DWORD WINAPI InputThread(LPVOID) {
                     Log("ERROR: PanelManager not available yet.");
                     break;
                 }
-                PostMessageA(g_gameWindow, WM_OPEN_PANEL, i, 0);
+
+                // Toggle: if same panel is already open, close with ESC
+                if (g_currentPanel == i) {
+                    Log("Closing panel: %s (toggle)", g_panels[i].panelName);
+                    g_currentPanel = -1;
+
+                    INPUT inputs[2] = {};
+                    inputs[0].type = INPUT_KEYBOARD;
+                    inputs[0].ki.wVk = VK_ESCAPE;
+                    inputs[0].ki.wScan = 0x01;
+                    SendInput(1, &inputs[0], sizeof(INPUT));
+                    Sleep(30);
+                    inputs[1].type = INPUT_KEYBOARD;
+                    inputs[1].ki.wVk = VK_ESCAPE;
+                    inputs[1].ki.wScan = 0x01;
+                    inputs[1].ki.dwFlags = KEYEVENTF_KEYUP;
+                    SendInput(1, &inputs[1], sizeof(INPUT));
+                } else {
+                    PostMessageA(g_gameWindow, WM_OPEN_PANEL, i, 0);
+                }
                 break;
             }
         }
@@ -680,7 +708,7 @@ static DWORD WINAPI ModThread(LPVOID) {
         g_logFile = fopen(logPath.c_str(), "w");
     }
 
-    Log("=== Quick Menu Hotkeys v1.3 ===");
+    Log("=== Quick Menu Hotkeys v1.4 ===");
 
     g_gameBase = (uintptr_t)GetModuleHandleA("CrimsonDesert.exe");
     if (!g_gameBase) { Log("ERROR: CrimsonDesert.exe not found"); return 0; }
