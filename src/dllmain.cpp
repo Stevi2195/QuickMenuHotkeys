@@ -5,7 +5,7 @@
 #include <string>
 
 // ============================================================
-//  Quick Menu Hotkeys v1.4 — Cross-Reference Pattern Scanner
+//  Quick Menu Hotkeys v1.5 — Cross-Reference Pattern Scanner
 //
 //  Finds the OpenPanel function by cross-referencing multiple
 //  known panel name strings. The common CALL target across
@@ -606,6 +606,10 @@ static DWORD WINAPI NameLogThread(LPVOID) {
 //  Input Thread
 // ============================================================
 
+static bool g_keyWasDown[32] = {};  // track previous key state per panel
+static DWORD g_lastActionTime = 0;  // cooldown between panel switches
+static const DWORD PANEL_COOLDOWN_MS = 400;  // 400ms between actions
+
 static DWORD WINAPI InputThread(LPVOID) {
     while (true) {
         Sleep(16);
@@ -618,32 +622,48 @@ static DWORD WINAPI InputThread(LPVOID) {
 
         for (int i = 0; i < NUM_PANELS; i++) {
             if (g_panels[i].key == 0x00) continue;
-            if (GetAsyncKeyState(g_panels[i].key) & 1) {
+
+            bool isDown = (GetAsyncKeyState(g_panels[i].key) & 0x8000) != 0;
+            if (isDown && !g_keyWasDown[i]) {
+                g_keyWasDown[i] = true;
+
+                // Cooldown: ignore rapid key presses
+                DWORD now = GetTickCount();
+                if (now - g_lastActionTime < PANEL_COOLDOWN_MS) break;
+                g_lastActionTime = now;
+
                 if (g_panelManager == 0) {
                     Log("ERROR: PanelManager not available yet.");
                     break;
                 }
 
-                // Toggle: if same panel is already open, close with ESC
+                // Toggle: if same panel is already open, close it internally
                 if (g_currentPanel == i) {
                     Log("Closing panel: %s (toggle)", g_panels[i].panelName);
                     g_currentPanel = -1;
 
-                    INPUT inputs[2] = {};
-                    inputs[0].type = INPUT_KEYBOARD;
-                    inputs[0].ki.wVk = VK_ESCAPE;
-                    inputs[0].ki.wScan = 0x01;
-                    SendInput(1, &inputs[0], sizeof(INPUT));
-                    Sleep(30);
-                    inputs[1].type = INPUT_KEYBOARD;
-                    inputs[1].ki.wVk = VK_ESCAPE;
-                    inputs[1].ki.wScan = 0x01;
-                    inputs[1].ki.dwFlags = KEYEVENTF_KEYUP;
-                    SendInput(1, &inputs[1], sizeof(INPUT));
+                    // Clear internal menu state flags via known global pointer
+                    if (g_pmGlobalAddr != 0) {
+                        __try {
+                            uintptr_t root = *(uintptr_t*)g_pmGlobalAddr;
+                            if (root) {
+                                uintptr_t uiCtrl = *(uintptr_t*)(root + 0x48);
+                                if (uiCtrl) {
+                                    *(uint8_t*)(uiCtrl + 0xcc4) = 0;
+                                    *(uint8_t*)(uiCtrl + 0xcbc) = 0;
+                                    Log("Menu state flags cleared (0xcc4/0xcbc)");
+                                }
+                            }
+                        } __except(EXCEPTION_EXECUTE_HANDLER) {
+                            Log("WARNING: Failed to clear menu flags");
+                        }
+                    }
                 } else {
                     PostMessageA(g_gameWindow, WM_OPEN_PANEL, i, 0);
                 }
                 break;
+            } else if (!isDown) {
+                g_keyWasDown[i] = false;
             }
         }
     }
@@ -708,7 +728,7 @@ static DWORD WINAPI ModThread(LPVOID) {
         g_logFile = fopen(logPath.c_str(), "w");
     }
 
-    Log("=== Quick Menu Hotkeys v1.4 ===");
+    Log("=== Quick Menu Hotkeys v1.5 ===");
 
     g_gameBase = (uintptr_t)GetModuleHandleA("CrimsonDesert.exe");
     if (!g_gameBase) { Log("ERROR: CrimsonDesert.exe not found"); return 0; }
