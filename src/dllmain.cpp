@@ -5,7 +5,7 @@
 #include <string>
 
 // ============================================================
-//  Quick Menu Hotkeys v1.7 — Cross-Reference Pattern Scanner
+//  Quick Menu Hotkeys v1.7.1 — Cross-Reference Pattern Scanner
 //
 //  Finds the OpenPanel function by cross-referencing multiple
 //  known panel name strings. The common CALL target across
@@ -531,14 +531,19 @@ static void __fastcall DetourOpenPanel(LONGLONG pm, const char* panelName, void*
     g_lastRDX = (LONGLONG)panelName;
     InterlockedIncrement(&g_hookCounter);
 
-    // Block ALL game-triggered opens for panels with hardcoded game keys (I,J,K,M).
-    // Our mod handles these panels entirely — the game's defaults are never needed.
+    // Block game-triggered opens ONLY when the user is pressing the game's default key
+    // (or a modifier combo on that key). This prevents the game's keybind from interfering
+    // while still allowing internal game UI calls (settlement, NPCs, etc.) to work normally.
     if (!g_ourCall && g_overrideGameKeys) {
         __try {
             for (int i = 0; i < NUM_PANELS; i++) {
-                if (g_panels[i].gameDefaultKey != 0 &&
-                    strcmp(panelName, g_panels[i].panelName) == 0) {
-                    Log("[Blocked] Game tried to open '%s'", panelName);
+                if (g_panels[i].gameDefaultKey == 0) continue;
+                if (strcmp(panelName, g_panels[i].panelName) != 0) continue;
+
+                // Only block if the game's default key is physically pressed right now
+                if (GetAsyncKeyState(g_panels[i].gameDefaultKey) & 0x8000) {
+                    Log("[Blocked] Game tried to open '%s' (key 0x%02X pressed)",
+                        panelName, g_panels[i].gameDefaultKey);
                     return;
                 }
             }
@@ -953,7 +958,7 @@ static DWORD WINAPI ModThread(LPVOID) {
 
     if (g_controllerEnabled) InitXInput();
 
-    Log("=== Quick Menu Hotkeys v1.7 ===");
+    Log("=== Quick Menu Hotkeys v1.7.1 ===");
 
     g_gameBase = (uintptr_t)GetModuleHandleA("CrimsonDesert.exe");
     if (!g_gameBase) { Log("ERROR: CrimsonDesert.exe not found"); return 0; }
