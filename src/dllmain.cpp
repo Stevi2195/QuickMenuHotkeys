@@ -5,7 +5,7 @@
 #include <string>
 
 // ============================================================
-//  Quick Menu Hotkeys v1.6 — Cross-Reference Pattern Scanner
+//  Quick Menu Hotkeys v1.7 — Cross-Reference Pattern Scanner
 //
 //  Finds the OpenPanel function by cross-referencing multiple
 //  known panel name strings. The common CALL target across
@@ -60,24 +60,25 @@ struct PanelBinding {
     DWORD       defaultKey;
     DWORD       gameDefaultKey;  // Game-internal hardcoded key (0 = none)
     DWORD       key;
+    DWORD       modifierKey;       // Keyboard modifier (Shift/Ctrl/Alt), 0 = none
     WORD        controllerButton;  // XInput button bitmask (0 = disabled)
 };
 
 // Verified panels — default keybinds for core menus, 0x00 = user-configurable
-//                                                          default  gameKey  key  ctrl
+//                                                          default  gameKey  key  mod  ctrl
 static PanelBinding g_panels[] = {
     // --- Core panels (default keybinds) ---
-    { "Inventory",          "InventoryEquipmentPanel",          0x49, 0x49, 0, 0 },  // I
-    { "QuestBook",          "QuestMenuPanel",                   0x4A, 0x4A, 0, 0 },  // J
-    { "SkillBook",          "SkillTreePanel",                   0x4B, 0x4B, 0, 0 },  // K
-    { "Knowledge",          "KnowledgePanel2",                  0x4C, 0x00, 0, 0 },  // L
-    { "Options",            "LogoutView",                       0x4F, 0x00, 0, 0 },  // O
-    { "Map",                "WorldMapView",                     0x4D, 0x4D, 0, 0 },  // M
+    { "Inventory",          "InventoryEquipmentPanel",          0x49, 0x49, 0, 0, 0 },  // I
+    { "QuestBook",          "QuestMenuPanel",                   0x4A, 0x4A, 0, 0, 0 },  // J
+    { "SkillBook",          "SkillTreePanel",                   0x4B, 0x4B, 0, 0, 0 },  // K
+    { "Knowledge",          "KnowledgePanel2",                  0x4C, 0x00, 0, 0, 0 },  // L
+    { "Options",            "LogoutView",                       0x4F, 0x00, 0, 0, 0 },  // O
+    { "Map",                "WorldMapView",                     0x4D, 0x4D, 0, 0, 0 },  // M
     // --- Extra panels (no default keybind — configure in INI) ---
-    { "Challenge",          "ChallengeMenuPanel2",              0x00, 0x00, 0, 0 },
-    { "FactionQuest",       "FactionQuestMenuPanel",            0x00, 0x00, 0, 0 },
-    { "Guides",             "PlayGuideView",                    0x00, 0x00, 0, 0 },
-    { "Notifications",      "AlertHistoryView",                 0x00, 0x00, 0, 0 },
+    { "Challenge",          "ChallengeMenuPanel2",              0x00, 0x00, 0, 0, 0 },
+    { "FactionQuest",       "FactionQuestMenuPanel",            0x00, 0x00, 0, 0, 0 },
+    { "Guides",             "PlayGuideView",                    0x00, 0x00, 0, 0, 0 },
+    { "Notifications",      "AlertHistoryView",                 0x00, 0x00, 0, 0, 0 },
 };
 
 static const int NUM_PANELS = sizeof(g_panels) / sizeof(g_panels[0]);
@@ -85,6 +86,7 @@ static const int NUM_PANELS = sizeof(g_panels) / sizeof(g_panels[0]);
 static bool g_enabled  = true;
 static bool g_debugLog = true;
 static bool g_overrideGameKeys = true;
+static DWORD g_reloadKey = 0;
 
 // OpenPanel detour: trampoline to original function
 static uintptr_t g_openPanelTrampoline = 0;
@@ -135,10 +137,12 @@ static void LoadConfig(const char* iniPath) {
     g_overrideGameKeys = GetPrivateProfileIntA("Settings", "OverrideGameKeys", 1, iniPath) != 0;
     g_controllerEnabled = GetPrivateProfileIntA("Settings", "ControllerEnabled", 1, iniPath) != 0;
     g_controllerModifier = (WORD)ReadHexValue("Settings", "ControllerModifier", 0, iniPath);
+    g_reloadKey = ReadHexValue("Settings", "ReloadKey", 0, iniPath);
 
     for (int i = 0; i < NUM_PANELS; i++) {
         g_panels[i].key = ReadHexValue(g_panels[i].section, "Hotkey",
                                         g_panels[i].defaultKey, iniPath);
+        g_panels[i].modifierKey = ReadHexValue(g_panels[i].section, "ModifierKey", 0, iniPath);
         g_panels[i].controllerButton = (WORD)ReadHexValue(
             g_panels[i].section, "ControllerButton", 0, iniPath);
     }
@@ -527,25 +531,29 @@ static void __fastcall DetourOpenPanel(LONGLONG pm, const char* panelName, void*
     g_lastRDX = (LONGLONG)panelName;
     InterlockedIncrement(&g_hookCounter);
 
-    // Block game-triggered opens for panels the user has remapped
+    // Block ALL game-triggered opens for panels with hardcoded game keys (I,J,K,M).
+    // Our mod handles these panels entirely — the game's defaults are never needed.
     if (!g_ourCall && g_overrideGameKeys) {
         __try {
             for (int i = 0; i < NUM_PANELS; i++) {
                 if (g_panels[i].gameDefaultKey != 0 &&
-                    g_panels[i].key != 0 &&
-                    g_panels[i].key != g_panels[i].gameDefaultKey &&
                     strcmp(panelName, g_panels[i].panelName) == 0) {
-                    Log("[Blocked] Game tried to open '%s' (remapped to 0x%02X)",
-                        panelName, g_panels[i].key);
+                    Log("[Blocked] Game tried to open '%s'", panelName);
                     return;
                 }
             }
         } __except(EXCEPTION_EXECUTE_HANDLER) {}
     }
 
-    // Forward to original function
+    // Forward to original function (SEH protected — disables mod on crash)
     typedef void (__fastcall* OrigFunc)(LONGLONG, const char*, void*);
-    ((OrigFunc)g_openPanelTrampoline)(pm, panelName, data);
+    __try {
+        ((OrigFunc)g_openPanelTrampoline)(pm, panelName, data);
+    } __except(EXCEPTION_EXECUTE_HANDLER) {
+        g_ready = false;
+        Log("FATAL: Trampoline crashed (0x%08X) — mod disabled to prevent further crashes",
+            GetExceptionCode());
+    }
 }
 
 static bool InstallHook(uintptr_t targetAddr) {
@@ -564,6 +572,25 @@ static bool InstallHook(uintptr_t targetAddr) {
         stolenLen += len;
     }
     memcpy(stolenBytes, target, stolenLen);
+
+    // Safety: reject stolen bytes with RIP-relative addressing — they would
+    // reference wrong memory when relocated to the trampoline.
+    for (int j = 0; j < stolenLen; ) {
+        BYTE* ip = stolenBytes + j;
+        bool hasRex = (ip[0] >= 0x40 && ip[0] <= 0x4F);
+        BYTE* op = hasRex ? ip + 1 : ip;
+        // Check for ModRM with mod=00, r/m=101 (RIP-relative)
+        if (op[0] == 0x8B || op[0] == 0x8D || op[0] == 0x89 || op[0] == 0x3B) {
+            BYTE modrm = op[1];
+            if ((modrm & 0xC7) == 0x05) {
+                Log("ERROR: RIP-relative instruction in stolen bytes at +%d — hook aborted", j);
+                return false;
+            }
+        }
+        int len = InstrLen(target + j);
+        if (len == 0) break;
+        j += len;
+    }
 
     Log("Stealing %d bytes from base+0x%llX",
         stolenLen, (unsigned long long)(targetAddr - g_gameBase));
@@ -600,10 +627,6 @@ static bool InstallHook(uintptr_t targetAddr) {
         (unsigned long long)(targetAddr - g_gameBase), trampMem);
     return true;
 }
-
-// ============================================================
-//  Sub-Panel Navigation (for panels inside ESC menu)
-// ============================================================
 
 // ============================================================
 //  Open Panel
@@ -695,8 +718,24 @@ static DWORD WINAPI NameLogThread(LPVOID) {
 // ============================================================
 
 static bool g_keyWasDown[32] = {};  // track previous key state per panel
+static bool g_reloadWasDown = false;
 static DWORD g_lastActionTime = 0;  // cooldown between panel switches
 static const DWORD PANEL_COOLDOWN_MS = 400;  // 400ms between actions
+static char g_iniPath[MAX_PATH] = {};
+
+// Debounce: delay plain key when modifier bindings exist on the same key
+static int   g_pendingPanel = -1;
+static DWORD g_pendingTime = 0;
+static const DWORD MODIFIER_DEBOUNCE_MS = 60;
+
+// Check if any panel has a modifier binding on the given key
+static bool HasModifierBindings(DWORD key) {
+    for (int i = 0; i < NUM_PANELS; i++) {
+        if (g_panels[i].key == key && g_panels[i].modifierKey != 0)
+            return true;
+    }
+    return false;
+}
 
 // Helper: handle panel action (toggle close or open) — shared by keyboard and controller
 static bool HandlePanelAction(int i) {
@@ -729,19 +768,98 @@ static DWORD WINAPI InputThread(LPVOID) {
         if (g_panelManager == 0 && g_pmGlobalAddr != 0)
             ReadPanelManagerFromGlobal();
 
+        // --- INI Reload hotkey ---
+        if (g_reloadKey != 0) {
+            bool rkDown = (GetAsyncKeyState(g_reloadKey) & 0x8000) != 0;
+            if (rkDown && !g_reloadWasDown) {
+                g_reloadWasDown = true;
+                LoadConfig(g_iniPath);
+                Log("--- INI reloaded (0x%02X pressed) ---", g_reloadKey);
+                for (int i = 0; i < NUM_PANELS; i++) {
+                    if (g_panels[i].key != 0x00)
+                        Log("  [%s] Hotkey=0x%02X Mod=0x%02X Ctrl=0x%04X",
+                            g_panels[i].section, g_panels[i].key,
+                            g_panels[i].modifierKey, g_panels[i].controllerButton);
+                }
+            } else if (!rkDown) {
+                g_reloadWasDown = false;
+            }
+        }
+
         // --- Keyboard polling ---
+        // Pass 1: panels WITH modifier (always runs, even during debounce)
         bool actionTaken = false;
         for (int i = 0; i < NUM_PANELS; i++) {
-            if (g_panels[i].key == 0x00) continue;
+            if (g_panels[i].key == 0x00 || g_panels[i].modifierKey == 0) continue;
 
-            bool isDown = (GetAsyncKeyState(g_panels[i].key) & 0x8000) != 0;
+            bool keyDown = (GetAsyncKeyState(g_panels[i].key) & 0x8000) != 0;
+            bool modDown = (GetAsyncKeyState(g_panels[i].modifierKey) & 0x8000) != 0;
+            bool isDown = keyDown && modDown;
+
             if (isDown && !g_keyWasDown[i]) {
                 g_keyWasDown[i] = true;
+                // Cancel any pending plain key on the same base key
+                if (g_pendingPanel >= 0 && g_panels[g_pendingPanel].key == g_panels[i].key) {
+                    Log("Debounce: cancelled plain '%s', modifier combo wins",
+                        g_panels[g_pendingPanel].panelName);
+                    g_pendingPanel = -1;
+                }
+                // Also mark plain-key panels on the same key as "seen"
+                // so they don't trigger when modifier is released
+                for (int k = 0; k < NUM_PANELS; k++) {
+                    if (g_panels[k].key == g_panels[i].key && g_panels[k].modifierKey == 0)
+                        g_keyWasDown[k] = true;
+                }
                 HandlePanelAction(i);
                 actionTaken = true;
                 break;
             } else if (!isDown) {
                 g_keyWasDown[i] = false;
+            }
+        }
+
+        // Debounce: fire pending plain key after delay
+        if (!actionTaken && g_pendingPanel >= 0) {
+            if (GetTickCount() - g_pendingTime >= MODIFIER_DEBOUNCE_MS) {
+                HandlePanelAction(g_pendingPanel);
+                g_pendingPanel = -1;
+            }
+            actionTaken = true;  // block further input while debouncing
+        }
+
+        // Pass 2: panels WITHOUT modifier
+        if (!actionTaken) {
+            for (int i = 0; i < NUM_PANELS; i++) {
+                if (g_panels[i].key == 0x00 || g_panels[i].modifierKey != 0) continue;
+
+                bool isDown = (GetAsyncKeyState(g_panels[i].key) & 0x8000) != 0;
+
+                // Guard: skip if ANY modifier for the same key is currently held
+                if (isDown) {
+                    for (int k = 0; k < NUM_PANELS; k++) {
+                        if (g_panels[k].key == g_panels[i].key &&
+                            g_panels[k].modifierKey != 0 &&
+                            (GetAsyncKeyState(g_panels[k].modifierKey) & 0x8000)) {
+                            isDown = false;
+                            break;
+                        }
+                    }
+                }
+
+                if (isDown && !g_keyWasDown[i]) {
+                    g_keyWasDown[i] = true;
+                    if (HasModifierBindings(g_panels[i].key)) {
+                        // Delay: give modifier time to register
+                        g_pendingPanel = i;
+                        g_pendingTime = GetTickCount();
+                    } else {
+                        HandlePanelAction(i);
+                    }
+                    actionTaken = true;
+                    break;
+                } else if (!isDown) {
+                    g_keyWasDown[i] = false;
+                }
             }
         }
 
@@ -825,16 +943,17 @@ static DWORD WINAPI ModThread(LPVOID) {
     iniPath += ".ini";
 
     LoadConfig(iniPath.c_str());
+    strncpy(g_iniPath, iniPath.c_str(), MAX_PATH - 1);
     if (!g_enabled) return 0;
-
-    if (g_controllerEnabled) InitXInput();
 
     if (g_debugLog) {
         std::string logPath = iniPath.substr(0, iniPath.rfind('.')) + ".log";
         g_logFile = fopen(logPath.c_str(), "w");
     }
 
-    Log("=== Quick Menu Hotkeys v1.6 ===");
+    if (g_controllerEnabled) InitXInput();
+
+    Log("=== Quick Menu Hotkeys v1.7 ===");
 
     g_gameBase = (uintptr_t)GetModuleHandleA("CrimsonDesert.exe");
     if (!g_gameBase) { Log("ERROR: CrimsonDesert.exe not found"); return 0; }
