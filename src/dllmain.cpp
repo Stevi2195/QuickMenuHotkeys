@@ -925,6 +925,15 @@ static DWORD WINAPI InputThread(LPVOID) {
                         }
                     }
                 }
+                // Guard: skip if any global modifier is held but panel has no modifier
+                // Prevents conflict with other mods using Shift+I, Ctrl+I etc.
+                if (isDown && g_panels[i].modifierKey == 0) {
+                    if ((GetAsyncKeyState(VK_SHIFT) & 0x8000) ||
+                        (GetAsyncKeyState(VK_CONTROL) & 0x8000) ||
+                        (GetAsyncKeyState(VK_MENU) & 0x8000)) {
+                        isDown = false;
+                    }
+                }
 
                 if (isDown && !g_keyWasDown[i]) {
                     g_keyWasDown[i] = true;
