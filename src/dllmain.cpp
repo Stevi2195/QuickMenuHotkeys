@@ -5,7 +5,7 @@
 #include <string>
 
 // ============================================================
-//  Quick Menu Hotkeys v1.7.1 — Cross-Reference Pattern Scanner
+//  Quick Menu Hotkeys v1.8 — Cross-Reference Pattern Scanner
 //
 //  Finds the OpenPanel function by cross-referencing multiple
 //  known panel name strings. The common CALL target across
@@ -167,16 +167,39 @@ static bool InitXInput() {
     return false;
 }
 
+// Check if the game is in a safe state for opening panels.
+// Blocks during cutscenes, QTEs, minigames, etc.
+// Subtypes: 0x06=cinema, 0x07=qte, 0x08=minigame, 0x0D/0x0E=normal gameplay
+static bool IsGameplayState() {
+    if (g_pmGlobalAddr == 0) return true;  // can't check, assume safe
+    __try {
+        uintptr_t root = *(uintptr_t*)g_pmGlobalAddr;
+        if (!root) return true;
+        uintptr_t mc = *(uintptr_t*)(root + 0x48);
+        if (!mc) return true;
+        uint8_t subtype = *(uint8_t*)(mc + 0xCA9);
+        if (subtype >= 0x0D) return true;   // normal gameplay
+        if (subtype == 0x0C) return true;    // main menu (ESC menu)
+        Log("[Safety] Blocked: unsafe state (subtype=0x%02X)", subtype);
+        return false;
+    } __except(EXCEPTION_EXECUTE_HANDLER) {}
+    return true;
+}
+
+// Menu state flag offsets (scanned dynamically from game code)
+static int g_flagOffset1 = 0;  // first byte-write-zero offset (near "LogoutView")
+static int g_flagOffset2 = 0;  // second byte-write-zero offset
+
 static void ClearMenuStateFlags() {
-    if (g_pmGlobalAddr != 0) {
+    if (g_pmGlobalAddr != 0 && g_flagOffset1 != 0) {
         __try {
             uintptr_t root = *(uintptr_t*)g_pmGlobalAddr;
             if (root) {
                 uintptr_t uiCtrl = *(uintptr_t*)(root + 0x48);
                 if (uiCtrl) {
-                    *(uint8_t*)(uiCtrl + 0xcc4) = 0;
-                    *(uint8_t*)(uiCtrl + 0xcbc) = 0;
-                    Log("Menu state flags cleared (0xcc4/0xcbc)");
+                    *(uint8_t*)(uiCtrl + g_flagOffset1) = 0;
+                    *(uint8_t*)(uiCtrl + g_flagOffset2) = 0;
+                    Log("Menu state flags cleared (0x%X/0x%X)", g_flagOffset1, g_flagOffset2);
                 }
             }
         } __except(EXCEPTION_EXECUTE_HANDLER) {
@@ -358,6 +381,55 @@ static bool FindOpenPanelFunction() {
 //   MOV reg, [reg+off2]     ; 48 8B xx xx            (second offset)
 //   MOV RCX, [RCX]          ; 48 8B 09               (final deref)
 //   CALL FindPanel           ; E8 xx xx xx xx
+
+// Scan for menu state flag offsets by finding two consecutive
+// MOV BYTE PTR [reg+disp32], 0 instructions near a "LogoutView" reference.
+// Known pattern: C6 xx CC_0C_00_00 00  C6 xx BC_0C_00_00 00
+static bool FindMenuStateFlagOffsets() {
+    uintptr_t strAddr = FindString("LogoutView");
+    if (!strAddr) return false;
+
+    BYTE* base = (BYTE*)g_gameBase;
+
+    // Find all LEA references to "LogoutView" and check nearby code
+    uintptr_t leaAddr = 0;
+    for (int attempt = 0; attempt < 10; attempt++) {
+        leaAddr = FindLEA(strAddr, leaAddr ? leaAddr + 1 : 0);
+        if (!leaAddr) break;
+
+        Log("FindMenuStateFlags: checking LEA at base+0x%llX",
+            (unsigned long long)(leaAddr - g_gameBase));
+
+        // Scan -80 to +80 bytes around the LEA for back-to-back MOV BYTE writes
+        BYTE* scan = (BYTE*)leaAddr;
+        for (int k = -80; k < 80; k++) {
+            BYTE* p = scan + k;
+            // Check: C6 [modrm] [disp32] 00 — 7 bytes, MOV BYTE [reg+disp32], 0
+            if (p[0] != 0xC6) continue;
+            if ((p[1] & 0xF8) != 0x80 || p[1] == 0x84) continue;
+            int disp1 = *(int*)(p + 2);
+            if (p[6] != 0x00) continue;
+            if (disp1 < 0xC00 || disp1 > 0xD00) continue;
+
+            // Check second MOV BYTE right after (7 bytes later)
+            BYTE* p2 = p + 7;
+            if (p2[0] != 0xC6) continue;
+            if ((p2[1] & 0xF8) != 0x80 || p2[1] == 0x84) continue;
+            int disp2 = *(int*)(p2 + 2);
+            if (p2[6] != 0x00) continue;
+            if (disp2 < 0xC00 || disp2 > 0xD00) continue;
+
+            g_flagOffset1 = disp1;
+            g_flagOffset2 = disp2;
+            Log("FindMenuStateFlags: OK (0x%X, 0x%X) at LEA%+d",
+                g_flagOffset1, g_flagOffset2, k);
+            return true;
+        }
+    }
+
+    Log("WARNING: Menu state flag offsets not found — toggle-close disabled");
+    return false;
+}
 
 static bool FindPanelManagerChain() {
     if (g_findPanelAddr == 0) return false;
@@ -746,6 +818,9 @@ static bool HasModifierBindings(DWORD key) {
 static bool HandlePanelAction(int i) {
     DWORD now = GetTickCount();
     if (now - g_lastActionTime < PANEL_COOLDOWN_MS) return false;
+
+    if (!IsGameplayState()) return false;
+
     g_lastActionTime = now;
 
     if (g_panelManager == 0) {
@@ -958,7 +1033,7 @@ static DWORD WINAPI ModThread(LPVOID) {
 
     if (g_controllerEnabled) InitXInput();
 
-    Log("=== Quick Menu Hotkeys v1.7.1 ===");
+    Log("=== Quick Menu Hotkeys v1.8 ===");
 
     g_gameBase = (uintptr_t)GetModuleHandleA("CrimsonDesert.exe");
     if (!g_gameBase) { Log("ERROR: CrimsonDesert.exe not found"); return 0; }
@@ -980,6 +1055,9 @@ static DWORD WINAPI ModThread(LPVOID) {
         Log("ERROR: Hook installation failed!");
         return 0;
     }
+
+    // Find menu state flag offsets (for toggle-close)
+    FindMenuStateFlagOffsets();
 
     // Find PanelManager global pointer chain (proactive resolution)
     FindPanelManagerChain();
