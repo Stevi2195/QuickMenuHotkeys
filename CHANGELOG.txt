@@ -1,0 +1,63 @@
+Quick Menu Hotkeys - Changelog
+
+== v1.9.1 (2026-04-02) ==
+- Added: Debug log now includes CRC32 hash of meta/0.papgt to help detect modded game files (JSON mods etc.) when troubleshooting
+
+== v1.9 (2026-03-30) ==
+- Fixed: Key blocking (OverrideGameKeys) no longer activates during mod initialization. Previously, if window subclassing failed, I/J/K/M would be blocked with no replacement hotkeys active.
+- Fixed: Toggle-close (pressing same hotkey to close panel) now runs on the game thread via PostMessage, preventing potential cross-thread memory corruption.
+- Fixed: PanelManager pointer is now refreshed from the global chain before every panel open, preventing stale pointer crashes after scene changes or loading screens.
+- Improved: RIP-relative instruction check in hook installer now covers all x64 opcodes (previously only checked MOV/LEA/CMP). Prevents unsafe trampoline relocation if a game update changes the function prologue.
+- Improved: Trampoline memory is locked to execute-read after setup (was execute-read-write).
+- Improved: OpenPanel now passes nullptr as data parameter, letting the game resolve the default tab per panel (previously used a static pointer captured from InventoryEquipmentPanel).
+- Improved: Log now warns when controller is enabled with a modifier but no ControllerButton is assigned to any panel.
+- Improved: Log now warns that a controller modifier button with a game function (e.g. LB=block) will trigger both actions simultaneously.
+
+== v1.8.1 (2026-03-29) ==
+- Compatibility: Hotkeys without a modifier are now blocked when Shift, Ctrl, or Alt is held. Prevents conflicts with other mods that use modifier+key combos on the same key (e.g. Private Storage Anywhere using Shift+I while Inventory uses plain I).
+
+== v1.8 (2026-03-29) ==
+- New: Safety check — hotkeys are blocked during cutscenes, QTEs, and minigames to prevent UI corruption
+- Update-proof: Menu state flag offsets (for toggle-close) are now scanned dynamically instead of hardcoded. Survives game patches that shift struct layouts.
+- Fixed: Updated menu state flag offset changed by game patch 1.01.00 (0xcc4 → 0xcc5)
+
+== v1.7.1 (2026-03-28) ==
+- Fixed: OverrideGameKeys no longer blocks internal game UI calls (settlement interface, NPC menus, etc.). Now only blocks when the user is physically pressing the game's default key (I/J/K/M).
+
+== v1.7 (2026-03-28) ==
+- New: Per-panel keyboard modifiers — use Shift+J, Ctrl+J etc. to bind multiple panels to the same key with different modifiers
+- New: INI hot-reload — press a configurable key (default F11) to reload all settings without restarting the game
+- Improved: OverrideGameKeys now fully blocks game-triggered I/J/K/M panel opens, preventing conflicts with modifier combos
+- Improved: Modifier key debounce — plain keys are delayed briefly when modifier bindings exist, preventing accidental triggers
+- Crash protection: stolen bytes are validated for RIP-relative instructions before hooking. If the trampoline crashes after a game update, the mod disables itself instead of crashing the game.
+- Fixed: XInput initialization logging was called before log file was opened
+- Cleaned up INI file with better comments and documentation
+
+== v1.6 (2026-03-27) ==
+- New: Controller support via XInput — assign controller buttons to any panel with optional modifier (e.g. LB + D-Pad). All controllers supported via Steam Input.
+- New: OverrideGameKeys — remapping a menu key (I, J, K, M) now automatically disables the game's hardcoded keybind, freeing it for abilities or other binds
+- Improved hook architecture: replaced assembly trampoline with C-function detour for better stability
+- Expanded INI key reference: F13-F24, navigation keys, modifier keys (LShift/RShift etc.), punctuation, mouse side buttons, media keys
+
+== v1.5 (2026-03-25) ==
+- Fixed key repeat issue: holding a key no longer causes the panel to rapidly open and close
+- Added cooldown (400ms) between panel switches to prevent failed opens when pressing keys in quick succession
+- Toggle close now uses the game's internal menu state flags instead of simulated ESC input
+
+== v1.4 (2026-03-25) ==
+- Toggle hotkeys: pressing the same hotkey again now closes the panel instead of doing nothing
+
+== v1.3 (2026-03-24) ==
+- Added World Map hotkey (M) as default keybind
+- Added extra panels: Challenge, Faction Quests, Guides, Notifications (no default keybind — configure in INI)
+- Update-proof: automatic pattern scanning finds OpenPanel across game updates — no more broken offsets after patches
+- Rewrote pattern scanner with cross-reference strategy
+- Proactive PanelManager resolution via global pointer chain — hotkeys work immediately without opening any menu first
+- Hook fallback still captures PanelManager from game calls if pointer chain is unavailable
+- Added Numpad key codes to INI reference table
+
+== v1.0 ==
+- Initial release
+- Hotkeys: I=Inventory, J=Journal, K=Skills, L=Knowledge, O=Options
+- Direct menu switching: press another hotkey while a menu is open to switch instantly
+- All hotkeys configurable via INI file

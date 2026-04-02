@@ -5,7 +5,7 @@
 #include <string>
 
 // ============================================================
-//  Quick Menu Hotkeys v1.8 — Cross-Reference Pattern Scanner
+//  Quick Menu Hotkeys v1.9 — Cross-Reference Pattern Scanner
 //
 //  Finds the OpenPanel function by cross-referencing multiple
 //  known panel name strings. The common CALL target across
@@ -48,7 +48,8 @@ static WNDPROC g_originalWndProc = nullptr;
 // Toggle tracking: which panel was last opened via hotkey (-1 = none)
 static volatile int g_currentPanel = -1;
 
-#define WM_OPEN_PANEL (WM_USER + 501)
+#define WM_OPEN_PANEL  (WM_USER + 501)
+#define WM_CLEAR_FLAGS (WM_USER + 502)
 
 // ============================================================
 //  Config
@@ -79,6 +80,7 @@ static PanelBinding g_panels[] = {
     { "FactionQuest",       "FactionQuestMenuPanel",            0x00, 0x00, 0, 0, 0 },
     { "Guides",             "PlayGuideView",                    0x00, 0x00, 0, 0, 0 },
     { "Notifications",      "AlertHistoryView",                 0x00, 0x00, 0, 0, 0 },
+    { "Pet",                "PetView",                          0x00, 0x00, 0, 0, 0 },
 };
 
 static const int NUM_PANELS = sizeof(g_panels) / sizeof(g_panels[0]);
@@ -120,6 +122,54 @@ static void Log(const char* fmt, ...) {
     fprintf(g_logFile, "\n");
     fflush(g_logFile);
     va_end(args);
+}
+
+// CRC32 of a file (for detecting modded game files in logs)
+static uint32_t FileCRC32(const char* path) {
+    static const uint32_t table[256] = {
+        0x00000000,0x77073096,0xEE0E612C,0x990951BA,0x076DC419,0x706AF48F,0xE963A535,0x9E6495A3,
+        0x0EDB8832,0x79DCB8A4,0xE0D5E91B,0x97D2D988,0x09B64C2B,0x7EB17CBF,0xE7B82D09,0x90BF1D9F,
+        0x1DB71064,0x6AB020F2,0xF3B97148,0x84BE41DE,0x1ADAD47D,0x6DDDE4EB,0xF4D4B551,0x83D385C7,
+        0x136C9856,0x646BA8C0,0xFD62F97A,0x8A65C9EC,0x14015C4F,0x63066CD9,0xFA0F3D63,0x8D080DF5,
+        0x3B6E20C8,0x4C69105E,0xD56041E4,0xA2677172,0x3C03E4D1,0x4B04D447,0xD20D85FD,0xA50AB56B,
+        0x35B5A8FA,0x42B2986C,0xDBBBC9D6,0xACBCF940,0x32D86CE3,0x45DF5C75,0xDCD60DCF,0xABD13D59,
+        0x26D930AC,0x51DE003A,0xC8D75180,0xBFD06116,0x21B4F0B5,0x56B3C423,0xCFBA9599,0xB8BDA50F,
+        0x2802B89E,0x5F058808,0xC60CD9B2,0xB10BE924,0x2F6F7C87,0x58684C11,0xC1611DAB,0xB6662D3D,
+        0x76DC4190,0x01DB7106,0x98D220BC,0xEFD5102A,0x71B18589,0x06B6B51F,0x9FBFE4A5,0xE8B8D433,
+        0x7807C9A2,0x0F00F934,0x9609A88E,0xE10E9818,0x7F6A0D6B,0x086D3D2D,0x91646C97,0xE6635C01,
+        0x6B6B51F4,0x1C6C6162,0x856530D8,0xF262004E,0x6C0695ED,0x1B01A57B,0x8208F4C1,0xF50FC457,
+        0x65B0D9C6,0x12B7E950,0x8BBEB8EA,0xFCB9887C,0x62DD1DDF,0x15DA2D49,0x8CD37CF3,0xFBD44C65,
+        0x4DB26158,0x3AB551CE,0xA3BC0074,0xD4BB30E2,0x4ADFA541,0x3DD895D7,0xA4D1C46D,0xD3D6F4FB,
+        0x4369E96A,0x346ED9FC,0xAD678846,0xDA60B8D0,0x44042D73,0x33031DE5,0xAA0A4C5F,0xDD0D7822,
+        0x5005713C,0x270241AA,0xBE0B1010,0xC90C2086,0x5768B525,0x206F85B3,0xB966D409,0xCE61E49F,
+        0x5EDEF90E,0x29D9C998,0xB0D09822,0xC7D7A8B4,0x59B33D17,0x2EB40D81,0xB7BD5C3B,0xC0BA6CAD,
+        0xEDB88320,0x9ABFB3B6,0x03B6E20C,0x74B1D29A,0xEAD54739,0x9DD277AF,0x04DB2615,0x73DC1683,
+        0xE3630B12,0x94643B84,0x0D6D6A3E,0x7A6A5AA8,0xE40ECF0B,0x9309FF9D,0x0A00AE27,0x7D079EB1,
+        0xF00F9344,0x8708A3D2,0x1E01F268,0x6906C2FE,0xF762575D,0x806567CB,0x196C3671,0x6E6B06E7,
+        0xFED41B76,0x89D32BE0,0x10DA7A5A,0x67DD4ACC,0xF9B9DF6F,0x8EBEEFF9,0x17B7BE43,0x60B08ED5,
+        0xD6D6A3E8,0xA1D1937E,0x38D8C2C4,0x4FDFF252,0xD1BB67F1,0xA6BC5767,0x3FB506DD,0x48B2364B,
+        0xD80D2BDA,0xAF0A1B4C,0x36034AF6,0x41047A60,0xDF60EFC3,0xA867DF55,0x316E8EEF,0x4669BE79,
+        0xCB61B38C,0xBC66831A,0x256FD2A0,0x5268E236,0xCC0C7795,0xBB0B4703,0x220216B9,0x5505262F,
+        0xC5BA3BBE,0xB2BD0B28,0x2BB45A92,0x5CB36A04,0xC2D7FFA7,0xB5D0CF31,0x2CD99E8B,0x5BDEAE1D,
+        0x9B64C2B0,0xEC63F226,0x756AA39C,0x026D930A,0x9C0906A9,0xEB0E363F,0x72076785,0x05005713,
+        0x95BF4A82,0xE2B87A14,0x7BB12BAE,0x0CB61B38,0x92D28E9B,0xE5D5BE0D,0x7CDCEFB7,0x0BDBDF21,
+        0x86D3D2D4,0xF1D4E242,0x68DDB3F6,0x1FDA836E,0x81BE16CD,0xF6B9265B,0x6FB077E1,0x18B74777,
+        0x88085AE6,0xFF0F6B70,0x66063BCA,0x11010B5C,0x8F659EFF,0xF862AE69,0x616BFFD3,0x166CCF45,
+        0xA00AE278,0xD70DD2EE,0x4E048354,0x3903B3C2,0xA7672661,0xD06016F7,0x4969474D,0x3E6E77DB,
+        0xAED16A4A,0xD9D65ADC,0x40DF0B66,0x37D83BF0,0xA9BCAE53,0xDEBB9EC5,0x47B2CF7F,0x30B5FFE9,
+        0xBDBDF21C,0xCABAC28A,0x53B39330,0x24B4A3A6,0xBAD03605,0xCDD706FF,0x54DE5729,0x23D967BF,
+        0xB3667A2E,0xC4614AB8,0x5D681B02,0x2A6F2B94,0xB40BBE37,0xC30C8EA1,0x5A05DF1B,0x2D02EF8D
+    };
+    FILE* f = fopen(path, "rb");
+    if (!f) return 0;
+    uint32_t crc = 0xFFFFFFFF;
+    uint8_t buf[4096];
+    size_t n;
+    while ((n = fread(buf, 1, sizeof(buf), f)) > 0)
+        for (size_t i = 0; i < n; i++)
+            crc = table[(crc ^ buf[i]) & 0xFF] ^ (crc >> 8);
+    fclose(f);
+    return crc ^ 0xFFFFFFFF;
 }
 
 // --- INI ---
@@ -606,7 +656,7 @@ static void __fastcall DetourOpenPanel(LONGLONG pm, const char* panelName, void*
     // Block game-triggered opens ONLY when the user is pressing the game's default key
     // (or a modifier combo on that key). This prevents the game's keybind from interfering
     // while still allowing internal game UI calls (settlement, NPCs, etc.) to work normally.
-    if (!g_ourCall && g_overrideGameKeys) {
+    if (!g_ourCall && g_ready && g_overrideGameKeys) {
         __try {
             for (int i = 0; i < NUM_PANELS; i++) {
                 if (g_panels[i].gameDefaultKey == 0) continue;
@@ -652,18 +702,47 @@ static bool InstallHook(uintptr_t targetAddr) {
 
     // Safety: reject stolen bytes with RIP-relative addressing — they would
     // reference wrong memory when relocated to the trampoline.
+    // Generic check: any instruction with a ModRM byte where mod=00, r/m=101
+    // uses RIP-relative addressing in x64 mode.
     for (int j = 0; j < stolenLen; ) {
         BYTE* ip = stolenBytes + j;
         bool hasRex = (ip[0] >= 0x40 && ip[0] <= 0x4F);
         BYTE* op = hasRex ? ip + 1 : ip;
-        // Check for ModRM with mod=00, r/m=101 (RIP-relative)
-        if (op[0] == 0x8B || op[0] == 0x8D || op[0] == 0x89 || op[0] == 0x3B) {
-            BYTE modrm = op[1];
+        int modrmOffset = 1;  // ModRM byte position after opcode
+
+        bool hasModRM = false;
+        if (op[0] == 0x0F) {
+            // Two-byte opcode — ModRM follows second byte
+            modrmOffset = 2;
+            BYTE op2 = op[1];
+            if ((op2 >= 0x10 && op2 <= 0x1F) || (op2 >= 0x28 && op2 <= 0x2F) ||
+                (op2 >= 0x40 && op2 <= 0x4F) || (op2 >= 0x80 && op2 <= 0x8F) ||
+                (op2 >= 0xB0 && op2 <= 0xBF) || op2 == 0xAF || op2 == 0xA3 ||
+                op2 == 0xA5 || op2 == 0xAB || op2 == 0xAD)
+                hasModRM = true;
+        } else {
+            // Single-byte opcodes with ModRM (common ranges)
+            BYTE b = op[0];
+            if ((b >= 0x00 && b <= 0x03) || (b >= 0x08 && b <= 0x0B) ||
+                (b >= 0x10 && b <= 0x13) || (b >= 0x18 && b <= 0x1B) ||
+                (b >= 0x20 && b <= 0x23) || (b >= 0x28 && b <= 0x2B) ||
+                (b >= 0x30 && b <= 0x33) || (b >= 0x38 && b <= 0x3B) ||
+                b == 0x63 || (b >= 0x80 && b <= 0x8D) ||
+                b == 0x8F || b == 0xC6 || b == 0xC7 ||
+                b == 0xF6 || b == 0xF7 || b == 0xFE || b == 0xFF ||
+                b == 0x69 || b == 0x6B || b == 0x85)
+                hasModRM = true;
+        }
+
+        if (hasModRM && (j + modrmOffset) < stolenLen) {
+            BYTE modrm = op[modrmOffset];
             if ((modrm & 0xC7) == 0x05) {
-                Log("ERROR: RIP-relative instruction in stolen bytes at +%d — hook aborted", j);
+                Log("ERROR: RIP-relative instruction in stolen bytes at +%d (op=%02X) — hook aborted",
+                    j, op[0]);
                 return false;
             }
         }
+
         int len = InstrLen(target + j);
         if (len == 0) break;
         j += len;
@@ -689,6 +768,10 @@ static bool InstallHook(uintptr_t targetAddr) {
 
     g_openPanelTrampoline = (uintptr_t)trampMem;
 
+    // Lock trampoline to execute-only (no longer needs write access)
+    DWORD trampOldProt;
+    VirtualProtect(trampMem, 64, PAGE_EXECUTE_READ, &trampOldProt);
+
     // --- Patch original: JMP to DetourOpenPanel ---
     DWORD oldProt;
     VirtualProtect((void*)targetAddr, stolenLen, PAGE_EXECUTE_READWRITE, &oldProt);
@@ -712,6 +795,11 @@ static bool InstallHook(uintptr_t targetAddr) {
 static void OpenPanelOnGameThread(int panelIndex) {
     if (panelIndex < 0 || panelIndex >= NUM_PANELS) return;
 
+    // Always refresh PanelManager from global chain before use
+    // (protects against stale pointer after UI rebuild / scene change)
+    if (g_pmGlobalAddr != 0)
+        ReadPanelManagerFromGlobal();
+
     LONGLONG pm = g_panelManager;
     if (pm == 0) {
         Log("ERROR: PanelManager not available!");
@@ -725,7 +813,9 @@ static void OpenPanelOnGameThread(int panelIndex) {
 
     typedef void (__fastcall* OpenPanelFunc)(LONGLONG, const char*, void*);
     OpenPanelFunc openPanel = (OpenPanelFunc)g_openPanelAddr;
-    void* dataPtr = g_r8DataAddr ? (void*)g_r8DataAddr : nullptr;
+    // Pass nullptr — OpenPanel looks up the default execute-event per panel name
+    // (verified in Ghidra: param_3==NULL → FUN_140aa5010 resolves default)
+    void* dataPtr = nullptr;
 
     const char* panelName = g_panels[panelIndex].panelName;
     Log("Opening panel: %s (index %d)", panelName, panelIndex);
@@ -752,6 +842,10 @@ static LRESULT CALLBACK HookedWndProc(HWND hwnd, UINT msg,
                                        WPARAM wParam, LPARAM lParam) {
     if (msg == WM_OPEN_PANEL) {
         OpenPanelOnGameThread((int)wParam);
+        return 0;
+    }
+    if (msg == WM_CLEAR_FLAGS) {
+        ClearMenuStateFlags();
         return 0;
     }
     // Reset panel tracking when user closes a menu with ESC
@@ -831,7 +925,7 @@ static bool HandlePanelAction(int i) {
     if (g_currentPanel == i) {
         Log("Closing panel: %s (toggle)", g_panels[i].panelName);
         g_currentPanel = -1;
-        ClearMenuStateFlags();
+        PostMessageA(g_gameWindow, WM_CLEAR_FLAGS, 0, 0);
     } else {
         PostMessageA(g_gameWindow, WM_OPEN_PANEL, i, 0);
     }
@@ -1042,7 +1136,7 @@ static DWORD WINAPI ModThread(LPVOID) {
 
     if (g_controllerEnabled) InitXInput();
 
-    Log("=== Quick Menu Hotkeys v1.8 ===");
+    Log("=== Quick Menu Hotkeys v1.9 ===");
 
     g_gameBase = (uintptr_t)GetModuleHandleA("CrimsonDesert.exe");
     if (!g_gameBase) { Log("ERROR: CrimsonDesert.exe not found"); return 0; }
@@ -1052,6 +1146,22 @@ static DWORD WINAPI ModThread(LPVOID) {
     g_imageSize = mi.SizeOfImage;
 
     Log("Game base: 0x%llX  Size: 0x%X", (unsigned long long)g_gameBase, g_imageSize);
+
+    // Hash meta/0.papgt to detect modded game files (JSON mods etc.)
+    {
+        std::string metaPath(dllPath);
+        size_t bs = metaPath.rfind('\\');
+        if (bs != std::string::npos) {
+            metaPath = metaPath.substr(0, bs);           // strip filename
+            bs = metaPath.rfind('\\');
+            if (bs != std::string::npos)
+                metaPath = metaPath.substr(0, bs);       // strip bin64
+        }
+        metaPath += "\\meta\\0.papgt";
+        uint32_t crc = FileCRC32(metaPath.c_str());
+        if (crc) Log("meta/0.papgt CRC32: %08X", crc);
+        else     Log("meta/0.papgt: NOT FOUND");
+    }
 
     // Pattern scan: find OpenPanel + FindPanel
     if (!FindOpenPanelFunction()) {
@@ -1083,11 +1193,21 @@ static DWORD WINAPI ModThread(LPVOID) {
                 (unsigned long long)g_panelManager);
     }
 
-    // Window subclassing
-    g_originalWndProc = (WNDPROC)SetWindowLongPtrA(g_gameWindow, GWLP_WNDPROC,
-                                                     (LONG_PTR)HookedWndProc);
+    // Window subclassing (retry up to 5 times — some overlays/mods delay window init)
+    for (int retry = 0; retry < 5; retry++) {
+        SendMessageTimeoutA(g_gameWindow, WM_NULL, 0, 0, SMTO_BLOCK, 1000, nullptr);
+        g_originalWndProc = (WNDPROC)SetWindowLongPtrA(g_gameWindow, GWLP_WNDPROC,
+                                                         (LONG_PTR)HookedWndProc);
+        if (g_originalWndProc) {
+            if (retry > 0) Log("Window subclassing succeeded on retry %d", retry);
+            break;
+        }
+        Log("WARNING: Window subclassing attempt %d failed, retrying...", retry + 1);
+        Sleep(2000);
+    }
     if (!g_originalWndProc) {
-        Log("ERROR: Window subclassing failed!");
+        Log("ERROR: Window subclassing failed after 5 attempts — disabling OverrideGameKeys");
+        g_overrideGameKeys = false;
         return 0;
     }
 
@@ -1106,8 +1226,20 @@ static DWORD WINAPI ModThread(LPVOID) {
     Log("OverrideGameKeys: %s", g_overrideGameKeys ? "ON" : "OFF");
     if (g_controllerEnabled && g_pXInputGetState) {
         Log("--- Controller Bindings ---");
-        if (g_controllerModifier != 0)
+        if (g_controllerModifier != 0) {
             Log("  Modifier: 0x%04X", g_controllerModifier);
+            Log("  NOTE: If the modifier button has a game function (e.g. LB=block),");
+            Log("        it will trigger BOTH the game action and the mod hotkey.");
+            Log("        Use an unused button as modifier to avoid conflicts.");
+        }
+        bool hasAnyButton = false;
+        for (int i = 0; i < NUM_PANELS; i++) {
+            if (g_panels[i].controllerButton != 0) { hasAnyButton = true; break; }
+        }
+        if (!hasAnyButton) {
+            Log("  WARNING: No ControllerButton assigned to any panel!");
+            Log("           Add e.g. ControllerButton=0001 (D-Pad Up) to a panel section.");
+        }
         for (int i = 0; i < NUM_PANELS; i++) {
             if (g_panels[i].controllerButton != 0)
                 Log("  [%s] %s = 0x%04X", g_panels[i].section,

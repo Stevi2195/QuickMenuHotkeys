@@ -1,0 +1,257 @@
+[size=4][b]Quick Menu Hotkeys[/b][/size]
+
+[line]
+
+Tired of holding ESC, navigating the radial wheel, and releasing just to open a menu?
+
+This mod adds direct keyboard and controller shortcuts for opening Crimson Desert menus instantly with a single button press. No radial wheel needed.
+
+[line]
+
+[size=3][b]Default Hotkeys[/b][/size]
+
+[list]
+[*][b]I[/b] = Inventory
+[*][b]J[/b] = Quest Book / Journal
+[*][b]K[/b] = Skill Tree
+[*][b]L[/b] = Knowledge
+[*][b]O[/b] = Options / Others
+[*][b]M[/b] = World Map
+[/list]
+
+[line]
+
+[size=3][b]Extra Panels (no default keybind)[/b][/size]
+
+These panels have no hotkey assigned by default. You can bind them to any key through the INI file:
+
+[list]
+[*]Challenge
+[*]Faction Quests
+[*]Guides
+[*]Notifications
+[/list]
+
+[line]
+
+[size=3][b]Features[/b][/size]
+
+[list]
+[*][b]Direct menu switching:[/b] Open one menu and jump straight to another without closing and reopening the radial menu.
+[*][b]Fully configurable:[/b] All hotkeys can be changed or disabled through the INI file. Set any key to [b]00[/b] to disable it.
+[*][b]Extra panels:[/b] Additional game menus such as Challenges, Faction Quests, Guides, and Notifications can be assigned manually.
+[*][b]Update-proof:[/b] Uses automatic pattern scanning to locate internal game functions instead of relying on hardcoded offsets.
+[*][b]Works immediately:[/b] Hotkeys are available as soon as gameplay starts. The mod resolves the game's PanelManager automatically.
+[*][b]Direct internal calls:[/b] Opens panels by calling the game's internal panel functions directly instead of simulating menu navigation.
+[*][b]Override game keys:[/b] When you remap a hotkey (e.g. Inventory from I to Tab), the game's hardcoded keybind for that key is automatically disabled — freeing it for other in-game actions like abilities.
+[*][b]Controller support:[/b] Assign controller buttons to any panel via XInput. Supports an optional modifier button (e.g. hold LB + press D-Pad). Works with Xbox controllers natively and all other controllers through Steam Input.
+[*][b]Keyboard modifiers:[/b] Bind multiple panels to the same key with different modifiers (e.g. Shift+J for Faction Quests, Ctrl+J for Challenges).
+[*][b]Crash protection:[/b] If a game update breaks the hook, the mod disables itself instead of crashing the game.
+[/list]
+
+[line]
+
+[size=3][b]Source Code / Transparency[/b][/size]
+
+The full source code for this mod is publicly available on GitHub for anyone who wants to review it or compile it manually.
+
+[URL=https://github.com/Stevi2195/QuickMenuHotkeys]GitHub Source Code[/URL]
+
+[line]
+
+[size=3][b]Antivirus Notice[/b][/size]
+
+Some antivirus programs may flag this mod because it relies on low-level hooking to access the game's internal menu functions directly.
+
+Crimson Desert does not provide an official mod API for this functionality, so the mod has to locate and call internal game functions in memory. That kind of behavior can look suspicious to antivirus software even when the mod itself is not malicious.
+
+Because of that, these flags may not fully disappear without breaking the way the mod works.
+
+[line]
+
+[size=3][b]Requirements[/b][/size]
+
+[list]
+[*]Ultimate ASI Loader (ThirteenAG) - place [b]version.dll[/b] in the game's [b]bin64[/b] folder. If you already use other ASI mods, the loader is probably already installed.
+[/list]
+
+[line]
+
+[size=3][b]Installation[/b][/size]
+
+[list=1]
+[*]Make sure Ultimate ASI Loader ([b]version.dll[/b]) is in:
+[code][Steam]\steamapps\common\Crimson Desert\bin64\[/code]
+[*]Copy [b]QuickMenuHotkeys.asi[/b] and [b]QuickMenuHotkeys.ini[/b] into the same [b]bin64[/b] folder.
+[*]Launch the game. The mod activates automatically once you are in-game.
+[/list]
+
+[line]
+
+[size=3][b]Configuration[/b][/size]
+
+Edit [b]QuickMenuHotkeys.ini[/b] to customize hotkeys:
+
+[code][Settings]
+Enabled=1           ; Master switch (0=off, 1=on)
+DebugLog=0          ; Create log file for troubleshooting (0=off, 1=on)
+OverrideGameKeys=1  ; Block game's hardcoded keybinds when remapped (0=off, 1=on)
+ControllerEnabled=1 ; Controller support (0=off, 1=on)
+ControllerModifier=0000 ; Hold this button before panel buttons (0000=none, 0100=LB)
+
+; --- Core panels (default keybinds) ---
+[Inventory]
+Hotkey=49           ; I
+
+[QuestBook]
+Hotkey=4A           ; J
+
+[SkillBook]
+Hotkey=4B           ; K
+
+[Knowledge]
+Hotkey=4C           ; L
+
+[Options]
+Hotkey=4F           ; O
+
+[Map]
+Hotkey=4D           ; M
+
+; --- Extra panels (assign your own keys) ---
+[Challenge]
+Hotkey=00           ; disabled by default
+
+[FactionQuest]
+Hotkey=00           ; disabled by default
+
+[Guides]
+Hotkey=00           ; disabled by default
+
+[Notifications]
+Hotkey=00           ; disabled by default[/code]
+
+Key codes use Windows Virtual Key Codes in hex format. A full reference table covering letters, numbers, F1–F24, numpad, navigation, modifiers, punctuation, mouse buttons, and media keys is included at the bottom of the INI file.
+
+[size=3][b]Controller Setup[/b][/size]
+
+To assign controller buttons, add [b]ControllerButton[/b] to any panel section. Use [b]ControllerModifier[/b] to require holding a button (recommended to avoid conflicts with in-game controls):
+
+[code][Settings]
+ControllerEnabled=1
+ControllerModifier=0100  ; Hold LB before pressing panel buttons
+
+[Inventory]
+Hotkey=49
+ControllerButton=0001    ; D-Pad Up
+
+[QuestBook]
+Hotkey=4A
+ControllerButton=0008    ; D-Pad Right
+
+[Map]
+Hotkey=4D
+ControllerButton=0002    ; D-Pad Down[/code]
+
+In this example, [b]LB + D-Pad Up[/b] opens Inventory, [b]LB + D-Pad Right[/b] opens the Quest Book, etc.
+
+[b]Controller button values:[/b] DPAD_UP=0001, DPAD_DOWN=0002, DPAD_LEFT=0004, DPAD_RIGHT=0008, START/MENU=0010, BACK/VIEW=0020, LEFT_STICK=0040, RIGHT_STICK=0080, LB=0100, RB=0200, A=1000, B=2000, X=4000, Y=8000
+
+[b]Non-Xbox controllers:[/b] PlayStation, Switch, and other controllers are supported through Steam Input, which is enabled by default in Steam. The mod uses XInput, and Steam automatically translates all controller types to XInput.
+
+[line]
+
+[size=3][b]Uninstall[/b][/size]
+
+Delete [b]QuickMenuHotkeys.asi[/b] and [b]QuickMenuHotkeys.ini[/b] from the game's [b]bin64[/b] folder.
+
+[line]
+
+[size=3][b]Changelog[/b][/size]
+
+[b]v1.9.1[/b]
+[list]
+[*]Added: Debug log now includes CRC32 hash of meta/0.papgt to help detect modded game files when troubleshooting
+[/list]
+
+[b]v1.9[/b]
+[list]
+[*]Fixed: Key blocking (OverrideGameKeys) no longer activates during mod initialization — if window subclassing fails, I/J/K/M are no longer stuck blocked
+[*]Fixed: Toggle-close now runs on the game thread via PostMessage (was direct cross-thread write)
+[*]Fixed: PanelManager pointer is refreshed from global chain before every panel open (prevents stale pointer after scene change)
+[*]Improved: RIP-relative instruction check covers all x64 opcodes (was only MOV/LEA/CMP)
+[*]Improved: Trampoline memory locked to execute-read after setup
+[*]Improved: OpenPanel passes nullptr as data parameter, letting the game resolve the default tab per panel
+[*]Improved: Log warns when controller modifier is set but no ControllerButton assigned
+[*]Improved: Mouse side buttons (XButton1=05, XButton2=06) documented as ModifierKey in INI
+[/list]
+
+[b]v1.8.1[/b]
+[list]
+[*]Compatibility: Hotkeys without a modifier are now blocked when Shift, Ctrl, or Alt is held. Prevents conflicts with other mods that use modifier+key combos on the same key (e.g. Private Storage Anywhere using Shift+I while Inventory uses plain I).
+[/list]
+
+[b]v1.8[/b]
+[list]
+[*]New: Safety check — hotkeys are blocked during cutscenes, QTEs, and minigames to prevent UI corruption
+[*]Update-proof: Menu state flag offsets for toggle-close are now scanned dynamically instead of hardcoded
+[*]Fixed: Updated menu state flag offset changed by game patch 1.01.00
+[/list]
+
+[b]v1.7.1[/b]
+[list]
+[*]Fixed: OverrideGameKeys no longer blocks internal game UI calls (settlement interface, NPC menus). Now only blocks when the user is physically pressing the game's default key.
+[/list]
+
+[b]v1.7[/b]
+[list]
+[*]New: Per-panel keyboard modifiers — use Shift+J, Ctrl+J etc. to bind multiple panels to the same key with different modifiers
+[*]New: INI hot-reload — press a configurable key (default F11) to reload all settings without restarting the game
+[*]Improved: OverrideGameKeys now fully blocks game-triggered I/J/K/M panel opens, preventing conflicts with modifier combos
+[*]Improved: Modifier key debounce — plain keys are delayed briefly when modifier bindings exist, preventing accidental triggers
+[*]Crash protection: stolen bytes are validated before hooking. If the trampoline crashes after a game update, the mod disables itself instead of crashing the game.
+[*]Fixed: XInput initialization logging was called before log file was opened
+[*]Cleaned up INI file with better comments and documentation
+[/list]
+
+[b]v1.6[/b]
+[list]
+[*]New: Controller support — assign XInput buttons to any panel with optional modifier (e.g. LB + D-Pad). Works with all controllers via Steam Input.
+[*]New: OverrideGameKeys — remapping a menu key (I, J, K, M) now automatically disables the game's hardcoded keybind for that key, freeing it for abilities or other binds
+[*]Improved hook architecture: replaced assembly trampoline with a C-function detour for better stability
+[*]Expanded INI key reference: added F13–F24, navigation keys, modifier keys (LShift/RShift etc.), punctuation, mouse buttons, and media keys
+[/list]
+
+[b]v1.5[/b]
+[list]
+[*]Fixed key repeat issue: holding a key no longer causes the panel to rapidly open and close
+[*]Added cooldown between panel switches to prevent failed opens when pressing keys in quick succession
+[*]Toggle close now uses the game's internal menu state flags instead of simulated ESC input
+[/list]
+
+[b]v1.4[/b]
+[list]
+[*]Toggle hotkeys: pressing the same hotkey again now closes the panel instead of doing nothing
+[/list]
+
+[b]v1.3[/b]
+[list]
+[*]Added World Map hotkey ([b]M[/b]) as a default keybind
+[*]Added extra panels: Challenge, Faction Quests, Guides, and Notifications
+[*]Automatic pattern scanning now resolves OpenPanel across updates instead of relying on static offsets
+[*]Reworked the scanner with a cross-reference strategy
+[*]PanelManager is now resolved proactively through a global pointer chain
+[*]Hook fallback still captures PanelManager if the pointer chain is unavailable
+[*]Added Numpad key codes to the INI reference table
+[/list]
+
+[b]v1.0[/b]
+[list]
+[*]Initial release with Inventory, Quest Book, Skill Tree, Knowledge, and Options hotkeys
+[/list]
+
+[line]
+
+[size=3][b]Also check out[/b][/size]
+
+[url=https://www.nexusmods.com/crimsondesert/mods/388][b]Private Storage Anywhere[/b][/url] — Open your Private Storage from anywhere with a single hotkey or controller button. No need to walk back to your camp chest. Fully compatible with Quick Menu Hotkeys — use Shift+I for storage and plain I for inventory.
