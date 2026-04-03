@@ -1,0 +1,25 @@
+# Build output
+*.obj
+*.asi
+*.exp
+*.lib
+*.log
+*.pdb
+
+# IDE
+.vs/
+*.suo
+*.user
+
+# ImGui (external dependency, too large for repo)
+src/imgui/
+
+# Releases / archives
+*.zip
+*.7z
+
+# Old backups / notes
+*.bak
+
+
+*.md

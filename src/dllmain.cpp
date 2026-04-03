@@ -1079,29 +1079,14 @@ static DWORD WINAPI InputThread(LPVOID) {
 //  Find Game Window
 // ============================================================
 
-struct FindWindowData { DWORD processId; HWND result; };
-
-static BOOL CALLBACK EnumWindowsProc(HWND hwnd, LPARAM lParam) {
-    FindWindowData* data = (FindWindowData*)lParam;
-    DWORD pid = 0;
-    GetWindowThreadProcessId(hwnd, &pid);
-    if (pid == data->processId && IsWindowVisible(hwnd)) {
-        char title[256];
-        GetWindowTextA(hwnd, title, sizeof(title));
-        if (title[0] != '\0') {
-            data->result = hwnd;
-            return FALSE;
-        }
+static HWND FindGameWindow(){
+    DWORD myPid=GetCurrentProcessId();
+    HWND h=nullptr;
+    while((h=FindWindowExW(nullptr,h,L"WindowsLauncherClassName",L"Crimson Desert"))!=nullptr){
+        DWORD pid=0;GetWindowThreadProcessId(h,&pid);
+        if(pid==myPid)return h;
     }
-    return TRUE;
-}
-
-static HWND FindGameWindow() {
-    FindWindowData data;
-    data.processId = GetCurrentProcessId();
-    data.result = nullptr;
-    EnumWindows(EnumWindowsProc, (LPARAM)&data);
-    return data.result;
+    return nullptr;
 }
 
 // ============================================================
@@ -1115,6 +1100,8 @@ static DWORD WINAPI ModThread(LPVOID) {
         if (g_gameWindow) break;
     }
     if (!g_gameWindow) return 0;
+    {char cls[256]={};char ttl[256]={};GetClassNameA(g_gameWindow,cls,256);GetWindowTextA(g_gameWindow,ttl,256);
+    Log("Game window: class='%s' title='%s'",cls,ttl);}
 
     Sleep(10000);
 
@@ -1191,6 +1178,12 @@ static DWORD WINAPI ModThread(LPVOID) {
         if (g_panelManager != 0)
             Log("PanelManager resolved from global: 0x%llX",
                 (unsigned long long)g_panelManager);
+    }
+
+    // Re-validate window handle before subclassing
+    if(!IsWindow(g_gameWindow)){
+        g_gameWindow=FindGameWindow();
+        if(!g_gameWindow||!IsWindow(g_gameWindow)){Log("FATAL: game window invalid before WndProc hook");return 0;}
     }
 
     // Window subclassing (retry up to 5 times — some overlays/mods delay window init)

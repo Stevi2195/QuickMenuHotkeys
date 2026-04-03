@@ -1,5 +1,9 @@
 Quick Menu Hotkeys - Changelog
 
+== v1.9.2 (2026-04-03) ==
+- Fixed: Window detection now uses the exact game window class name instead of blind enumeration, preventing conflicts with overlays (Discord, Steam, etc.)
+- Added: Game window class/title logged on startup for easier troubleshooting
+
 == v1.9.1 (2026-04-02) ==
 - Added: Debug log now includes CRC32 hash of meta/0.papgt to help detect modded game files (JSON mods etc.) when troubleshooting
 
