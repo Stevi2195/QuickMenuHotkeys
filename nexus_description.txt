@@ -159,6 +159,11 @@ Delete [b]QuickMenuHotkeys.asi[/b] and [b]QuickMenuHotkeys.ini[/b] from the game
 
 [size=3][b]Changelog[/b][/size]
 
+[b]v1.9.2[/b]
+[list]
+[*]Fixed: Switching from a modifier-bound panel to the plain key on the same base key (e.g. Shift+J → J) no longer closes the menu. The debounce delay is now skipped when the intent is unambiguous.
+[/list]
+
 [b]v1.9.1[/b]
 [list]
 [*]Added: Debug log now includes CRC32 hash of meta/0.papgt to help detect modded game files when troubleshooting

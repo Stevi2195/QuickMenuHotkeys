@@ -5,7 +5,7 @@
 #include <string>
 
 // ============================================================
-//  Quick Menu Hotkeys v1.9 — Cross-Reference Pattern Scanner
+//  Quick Menu Hotkeys v1.9.2 — Cross-Reference Pattern Scanner
 //
 //  Finds the OpenPanel function by cross-referencing multiple
 //  known panel name strings. The common CALL target across
@@ -908,6 +908,15 @@ static bool HasModifierBindings(DWORD key) {
     return false;
 }
 
+// Check if g_currentPanel is a modifier-bound panel on the given base key.
+// When true, pressing the plain key is unambiguous (user wants to switch away
+// from the modifier panel), so debounce can be skipped.
+static bool IsModifierPanelActiveOnKey(DWORD key) {
+    if (g_currentPanel < 0 || g_currentPanel >= NUM_PANELS) return false;
+    return g_panels[g_currentPanel].key == key &&
+           g_panels[g_currentPanel].modifierKey != 0;
+}
+
 // Helper: handle panel action (toggle close or open) — shared by keyboard and controller
 static bool HandlePanelAction(int i) {
     DWORD now = GetTickCount();
@@ -1031,7 +1040,7 @@ static DWORD WINAPI InputThread(LPVOID) {
 
                 if (isDown && !g_keyWasDown[i]) {
                     g_keyWasDown[i] = true;
-                    if (HasModifierBindings(g_panels[i].key)) {
+                    if (HasModifierBindings(g_panels[i].key) && !IsModifierPanelActiveOnKey(g_panels[i].key)) {
                         // Delay: give modifier time to register
                         g_pendingPanel = i;
                         g_pendingTime = GetTickCount();
@@ -1123,7 +1132,7 @@ static DWORD WINAPI ModThread(LPVOID) {
 
     if (g_controllerEnabled) InitXInput();
 
-    Log("=== Quick Menu Hotkeys v1.9 ===");
+    Log("=== Quick Menu Hotkeys v1.9.2 ===");
 
     g_gameBase = (uintptr_t)GetModuleHandleA("CrimsonDesert.exe");
     if (!g_gameBase) { Log("ERROR: CrimsonDesert.exe not found"); return 0; }
