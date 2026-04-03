@@ -49,16 +49,6 @@ These panels have no hotkey assigned by default. You can bind them to any key th
 [*][b]Crash protection:[/b] If a game update breaks the hook, the mod disables itself instead of crashing the game.
 [/list]
 
-[line]
-
-[size=3][b]Source Code / Transparency[/b][/size]
-
-The full source code for this mod is publicly available on GitHub for anyone who wants to review it or compile it manually.
-
-[URL=https://github.com/Stevi2195/QuickMenuHotkeys]GitHub Source Code[/URL]
-
-[line]
-
 [size=3][b]Antivirus Notice[/b][/size]
 
 Some antivirus programs may flag this mod because it relies on low-level hooking to access the game's internal menu functions directly.
@@ -172,6 +162,8 @@ Delete [b]QuickMenuHotkeys.asi[/b] and [b]QuickMenuHotkeys.ini[/b] from the game
 [b]v1.9.1[/b]
 [list]
 [*]Added: Debug log now includes CRC32 hash of meta/0.papgt to help detect modded game files when troubleshooting
+[*]Fixed: Window detection now uses the exact game window class name instead of blind enumeration, preventing conflicts with overlays (Discord, Steam, etc.)
+[*]Added: Game window class/title logged on startup for easier troubleshooting
 [/list]
 
 [b]v1.9[/b]
