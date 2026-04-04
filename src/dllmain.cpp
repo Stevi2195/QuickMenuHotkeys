@@ -5,7 +5,7 @@
 #include <string>
 
 // ============================================================
-//  Quick Menu Hotkeys v1.9.2 — Cross-Reference Pattern Scanner
+//  Quick Menu Hotkeys v1.9.3 — Cross-Reference Pattern Scanner
 //
 //  Finds the OpenPanel function by cross-referencing multiple
 //  known panel name strings. The common CALL target across
@@ -47,6 +47,7 @@ static WNDPROC g_originalWndProc = nullptr;
 
 // Toggle tracking: which panel was last opened via hotkey (-1 = none)
 static volatile int g_currentPanel = -1;
+static volatile bool g_panelConfirmedOpen = false;  // true once flag1 seen non-zero after open
 
 #define WM_OPEN_PANEL  (WM_USER + 501)
 #define WM_CLEAR_FLAGS (WM_USER + 502)
@@ -116,6 +117,10 @@ static WORD g_prevButtons = 0;
 // --- Logging ---
 static void Log(const char* fmt, ...) {
     if (!g_logFile) return;
+    SYSTEMTIME st;
+    GetLocalTime(&st);
+    fprintf(g_logFile, "[%02d:%02d:%02d.%03d] ",
+            st.wHour, st.wMinute, st.wSecond, st.wMilliseconds);
     va_list args;
     va_start(args, fmt);
     vfprintf(g_logFile, fmt, args);
@@ -831,6 +836,7 @@ static void OpenPanelOnGameThread(int panelIndex) {
             GetExceptionCode(), panelName);
         g_panelManager = 0;
         g_currentPanel = -1;
+        g_panelConfirmedOpen = false;
     }
 }
 
@@ -851,6 +857,7 @@ static LRESULT CALLBACK HookedWndProc(HWND hwnd, UINT msg,
     // Reset panel tracking when user closes a menu with ESC
     if (msg == WM_KEYDOWN && wParam == VK_ESCAPE) {
         g_currentPanel = -1;
+        g_panelConfirmedOpen = false;
     }
     return CallWindowProcA(g_originalWndProc, hwnd, msg, wParam, lParam);
 }
@@ -934,6 +941,7 @@ static bool HandlePanelAction(int i) {
     if (g_currentPanel == i) {
         Log("Closing panel: %s (toggle)", g_panels[i].panelName);
         g_currentPanel = -1;
+        g_panelConfirmedOpen = false;
         PostMessageA(g_gameWindow, WM_CLEAR_FLAGS, 0, 0);
     } else {
         PostMessageA(g_gameWindow, WM_OPEN_PANEL, i, 0);
@@ -950,6 +958,28 @@ static DWORD WINAPI InputThread(LPVOID) {
         // Keep PanelManager fresh from global chain
         if (g_panelManager == 0 && g_pmGlobalAddr != 0)
             ReadPanelManagerFromGlobal();
+
+        // Detect game-initiated panel close via menu state flag1.
+        // flag1 (offset 0xCC5) is non-zero when a panel is open, 0 when closed.
+        if (g_currentPanel >= 0 && g_flagOffset1 != 0 && g_pmGlobalAddr != 0) {
+            __try {
+                uintptr_t root = *(uintptr_t*)g_pmGlobalAddr;
+                if (root) {
+                    uintptr_t mc = *(uintptr_t*)(root + 0x48);
+                    if (mc) {
+                        uint8_t f1 = *(volatile uint8_t*)(mc + g_flagOffset1);
+                        if (f1 != 0) {
+                            g_panelConfirmedOpen = true;
+                        } else if (g_panelConfirmedOpen) {
+                            Log("Panel '%s' closed by game (flag1 → 0), resetting tracker",
+                                g_panels[g_currentPanel].panelName);
+                            g_currentPanel = -1;
+                            g_panelConfirmedOpen = false;
+                        }
+                    }
+                }
+            } __except(EXCEPTION_EXECUTE_HANDLER) {}
+        }
 
         // --- INI Reload hotkey ---
         if (g_reloadKey != 0) {
@@ -1132,7 +1162,7 @@ static DWORD WINAPI ModThread(LPVOID) {
 
     if (g_controllerEnabled) InitXInput();
 
-    Log("=== Quick Menu Hotkeys v1.9.2 ===");
+    Log("=== Quick Menu Hotkeys v1.9.3 ===");
 
     g_gameBase = (uintptr_t)GetModuleHandleA("CrimsonDesert.exe");
     if (!g_gameBase) { Log("ERROR: CrimsonDesert.exe not found"); return 0; }

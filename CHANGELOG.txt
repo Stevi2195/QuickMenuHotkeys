@@ -1,5 +1,9 @@
 Quick Menu Hotkeys - Changelog
 
+== v1.9.3 (2026-04-04) ==
+- Fixed: Toggle state no longer desyncs when the game closes a panel (e.g. using an item, teleporting from map). Previously required pressing the hotkey twice after a game-initiated close.
+- Added: Log output now includes timestamps ([HH:MM:SS.mmm]) for easier debugging
+
 == v1.9.2 (2026-04-04) ==
 - Fixed: Switching from a modifier-bound panel to the plain key on the same base key (e.g. Shift+J → J) no longer closes the menu. The debounce delay is now skipped when the intent is unambiguous.
 
