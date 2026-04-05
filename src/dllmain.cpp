@@ -5,7 +5,7 @@
 #include <string>
 
 // ============================================================
-//  Quick Menu Hotkeys v1.9.3 — Cross-Reference Pattern Scanner
+//  Quick Menu Hotkeys v1.9.4 — Cross-Reference Pattern Scanner
 //
 //  Finds the OpenPanel function by cross-referencing multiple
 //  known panel name strings. The common CALL target across
@@ -261,6 +261,20 @@ static void ClearMenuStateFlags() {
             Log("WARNING: Failed to clear menu flags");
         }
     }
+}
+
+// Check if flag1 (mc+0xCC5) is currently set — indicates a panel is open.
+// Used at key-press time to verify the panel is still open before toggle-close.
+static bool IsPanelFlagSet() {
+    if (g_pmGlobalAddr == 0 || g_flagOffset1 == 0) return false;
+    __try {
+        uintptr_t root = *(uintptr_t*)g_pmGlobalAddr;
+        if (!root) return false;
+        uintptr_t mc = *(uintptr_t*)(root + 0x48);
+        if (!mc) return false;
+        return *(volatile uint8_t*)(mc + g_flagOffset1) != 0;
+    } __except(EXCEPTION_EXECUTE_HANDLER) {}
+    return false;
 }
 
 // ============================================================
@@ -938,6 +952,16 @@ static bool HandlePanelAction(int i) {
         return false;
     }
 
+    // Verify panel is actually still open before toggle-close.
+    // flag1 (mc+0xCC5) is non-zero when a panel is open, 0 when closed.
+    // If flag1 is 0 but we think a panel is open → game closed it → open fresh.
+    if (g_currentPanel == i && !IsPanelFlagSet()) {
+        Log("Panel '%s' was already closed by game (flag1=0), opening fresh",
+            g_panels[i].panelName);
+        g_currentPanel = -1;
+        g_panelConfirmedOpen = false;
+    }
+
     if (g_currentPanel == i) {
         Log("Closing panel: %s (toggle)", g_panels[i].panelName);
         g_currentPanel = -1;
@@ -959,27 +983,9 @@ static DWORD WINAPI InputThread(LPVOID) {
         if (g_panelManager == 0 && g_pmGlobalAddr != 0)
             ReadPanelManagerFromGlobal();
 
-        // Detect game-initiated panel close via menu state flag1.
-        // flag1 (offset 0xCC5) is non-zero when a panel is open, 0 when closed.
-        if (g_currentPanel >= 0 && g_flagOffset1 != 0 && g_pmGlobalAddr != 0) {
-            __try {
-                uintptr_t root = *(uintptr_t*)g_pmGlobalAddr;
-                if (root) {
-                    uintptr_t mc = *(uintptr_t*)(root + 0x48);
-                    if (mc) {
-                        uint8_t f1 = *(volatile uint8_t*)(mc + g_flagOffset1);
-                        if (f1 != 0) {
-                            g_panelConfirmedOpen = true;
-                        } else if (g_panelConfirmedOpen) {
-                            Log("Panel '%s' closed by game (flag1 → 0), resetting tracker",
-                                g_panels[g_currentPanel].panelName);
-                            g_currentPanel = -1;
-                            g_panelConfirmedOpen = false;
-                        }
-                    }
-                }
-            } __except(EXCEPTION_EXECUTE_HANDLER) {}
-        }
+        // Panel close detection is now handled in HandlePanelAction via
+        // IsAnyPanelStateActive() — checks the full state-flag array (mc+0xCB8,
+        // 16 slots) instead of only flag1 (mc+0xCC5 = slot 0x0D).
 
         // --- INI Reload hotkey ---
         if (g_reloadKey != 0) {
@@ -1162,7 +1168,7 @@ static DWORD WINAPI ModThread(LPVOID) {
 
     if (g_controllerEnabled) InitXInput();
 
-    Log("=== Quick Menu Hotkeys v1.9.3 ===");
+    Log("=== Quick Menu Hotkeys v1.9.4 ===");
 
     g_gameBase = (uintptr_t)GetModuleHandleA("CrimsonDesert.exe");
     if (!g_gameBase) { Log("ERROR: CrimsonDesert.exe not found"); return 0; }

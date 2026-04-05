@@ -1,5 +1,9 @@
 Quick Menu Hotkeys - Changelog
 
+== v1.9.4 (2026-04-06) ==
+- Fixed: Pressing a hotkey after the game closed a panel (e.g. using an item) no longer requires a double press. The mod now verifies the panel's state flag at key-press time before deciding to toggle-close.
+- Added: Pet as extra panel (no default keybind)
+
 == v1.9.3 (2026-04-04) ==
 - Fixed: Toggle state no longer desyncs when the game closes a panel (e.g. using an item, teleporting from map). Previously required pressing the hotkey twice after a game-initiated close.
 - Added: Log output now includes timestamps ([HH:MM:SS.mmm]) for easier debugging

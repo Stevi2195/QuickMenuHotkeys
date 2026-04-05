@@ -30,6 +30,7 @@ These panels have no hotkey assigned by default. You can bind them to any key th
 [*]Faction Quests
 [*]Guides
 [*]Notifications
+[*]Pet
 [/list]
 
 [line]
@@ -158,6 +159,12 @@ Delete [b]QuickMenuHotkeys.asi[/b] and [b]QuickMenuHotkeys.ini[/b] from the game
 [line]
 
 [size=3][b]Changelog[/b][/size]
+
+[b]v1.9.4[/b]
+[list]
+[*]Fixed: Pressing a hotkey after the game closed a panel (e.g. using an item) no longer requires a double press. The mod now verifies the panel's state flag at key-press time before deciding to toggle-close.
+[*]Added: Pet as extra panel (no default keybind)
+[/list]
 
 [b]v1.9.3[/b]
 [list]
