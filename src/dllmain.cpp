@@ -5,7 +5,7 @@
 #include <string>
 
 // ============================================================
-//  Quick Menu Hotkeys v1.9.4 — Cross-Reference Pattern Scanner
+//  Quick Menu Hotkeys v1.10 — Cross-Reference Pattern Scanner
 //
 //  Finds the OpenPanel function by cross-referencing multiple
 //  known panel name strings. The common CALL target across
@@ -64,24 +64,26 @@ struct PanelBinding {
     DWORD       key;
     DWORD       modifierKey;       // Keyboard modifier (Shift/Ctrl/Alt), 0 = none
     WORD        controllerButton;  // XInput button bitmask (0 = disabled)
+    int         psButtonByteOff;   // HID button byte offset (0-2), -1 = disabled
+    BYTE        psButtonBitMask;   // HID button bit mask
 };
 
 // Verified panels — default keybinds for core menus, 0x00 = user-configurable
-//                                                          default  gameKey  key  mod  ctrl
+//                                                          default  gameKey  key  mod  ctrl  psOff psMask
 static PanelBinding g_panels[] = {
     // --- Core panels (default keybinds) ---
-    { "Inventory",          "InventoryEquipmentPanel",          0x49, 0x49, 0, 0, 0 },  // I
-    { "QuestBook",          "QuestMenuPanel",                   0x4A, 0x4A, 0, 0, 0 },  // J
-    { "SkillBook",          "SkillTreePanel",                   0x4B, 0x4B, 0, 0, 0 },  // K
-    { "Knowledge",          "KnowledgePanel2",                  0x4C, 0x00, 0, 0, 0 },  // L
-    { "Options",            "LogoutView",                       0x4F, 0x00, 0, 0, 0 },  // O
-    { "Map",                "WorldMapView",                     0x4D, 0x4D, 0, 0, 0 },  // M
+    { "Inventory",          "InventoryEquipmentPanel",          0x49, 0x49, 0, 0, 0, -1, 0 },  // I
+    { "QuestBook",          "QuestMenuPanel",                   0x4A, 0x4A, 0, 0, 0, -1, 0 },  // J
+    { "SkillBook",          "SkillTreePanel",                   0x4B, 0x4B, 0, 0, 0, -1, 0 },  // K
+    { "Knowledge",          "KnowledgePanel2",                  0x4C, 0x00, 0, 0, 0, -1, 0 },  // L
+    { "Options",            "LogoutView",                       0x4F, 0x00, 0, 0, 0, -1, 0 },  // O
+    { "Map",                "WorldMapView",                     0x4D, 0x4D, 0, 0, 0, -1, 0 },  // M
     // --- Extra panels (no default keybind — configure in INI) ---
-    { "Challenge",          "ChallengeMenuPanel2",              0x00, 0x00, 0, 0, 0 },
-    { "FactionQuest",       "FactionQuestMenuPanel",            0x00, 0x00, 0, 0, 0 },
-    { "Guides",             "PlayGuideView",                    0x00, 0x00, 0, 0, 0 },
-    { "Notifications",      "AlertHistoryView",                 0x00, 0x00, 0, 0, 0 },
-    { "Pet",                "PetView",                          0x00, 0x00, 0, 0, 0 },
+    { "Challenge",          "ChallengeMenuPanel2",              0x00, 0x00, 0, 0, 0, -1, 0 },
+    { "FactionQuest",       "FactionQuestMenuPanel",            0x00, 0x00, 0, 0, 0, -1, 0 },
+    { "Guides",             "PlayGuideView",                    0x00, 0x00, 0, 0, 0, -1, 0 },
+    { "Notifications",      "AlertHistoryView",                 0x00, 0x00, 0, 0, 0, -1, 0 },
+    { "Pet",                "PetView",                          0x00, 0x00, 0, 0, 0, -1, 0 },
 };
 
 static const int NUM_PANELS = sizeof(g_panels) / sizeof(g_panels[0]);
@@ -113,6 +115,23 @@ static HMODULE g_hXInput = nullptr;
 static bool g_controllerEnabled = true;
 static WORD g_controllerModifier = 0;
 static WORD g_prevButtons = 0;
+
+// --- PS Controller (HID Raw Input) ---
+#define SONY_VID    0x054C
+#define DS4_PID_1   0x05C4  // DualShock 4 v1
+#define DS4_PID_2   0x09CC  // DualShock 4 v2
+#define DS5_PID     0x0CE6  // DualSense
+#define DS5_EDGE    0x0DF2  // DualSense Edge
+
+static HANDLE   g_cachedHidDevice    = nullptr;
+static bool     g_cachedIsSony       = false;
+static int      g_cachedReportOffset = -1;
+static volatile LONG g_hidButtonsPacked = 0;  // [buttons1 | buttons2<<8 | buttons3<<16]
+static volatile bool g_hidConnected  = false;
+
+static int  g_psModifierByteOff = -1;   // -1 = no modifier
+static BYTE g_psModifierBitMask = 0;
+static bool g_psModifierEnabled = false;
 
 // --- Logging ---
 static void Log(const char* fmt, ...) {
@@ -186,6 +205,8 @@ static DWORD ReadHexValue(const char* section, const char* key,
     return (DWORD)strtoul(buf, nullptr, 16);
 }
 
+static bool ParsePSButtonName(const char* name, int* outByteOff, BYTE* outBitMask);  // forward decl
+
 static void LoadConfig(const char* iniPath) {
     g_enabled  = GetPrivateProfileIntA("Settings", "Enabled",  1, iniPath) != 0;
     g_debugLog = GetPrivateProfileIntA("Settings", "DebugLog", 1, iniPath) != 0;
@@ -194,12 +215,31 @@ static void LoadConfig(const char* iniPath) {
     g_controllerModifier = (WORD)ReadHexValue("Settings", "ControllerModifier", 0, iniPath);
     g_reloadKey = ReadHexValue("Settings", "ReloadKey", 0, iniPath);
 
+    // PSModifier — global modifier for PS controller buttons
+    char psMod[32];
+    GetPrivateProfileStringA("Settings", "PSModifier", "none", psMod, sizeof(psMod), iniPath);
+    g_psModifierEnabled = false;
+    g_psModifierByteOff = -1;
+    g_psModifierBitMask = 0;
+    if (_stricmp(psMod, "none") != 0) {
+        if (ParsePSButtonName(psMod, &g_psModifierByteOff, &g_psModifierBitMask))
+            g_psModifierEnabled = true;
+    }
+
     for (int i = 0; i < NUM_PANELS; i++) {
         g_panels[i].key = ReadHexValue(g_panels[i].section, "Hotkey",
                                         g_panels[i].defaultKey, iniPath);
         g_panels[i].modifierKey = ReadHexValue(g_panels[i].section, "ModifierKey", 0, iniPath);
         g_panels[i].controllerButton = (WORD)ReadHexValue(
             g_panels[i].section, "ControllerButton", 0, iniPath);
+
+        // Per-panel PSButton (native HID)
+        char psBtn[32];
+        GetPrivateProfileStringA(g_panels[i].section, "PSButton", "none", psBtn, sizeof(psBtn), iniPath);
+        g_panels[i].psButtonByteOff = -1;
+        g_panels[i].psButtonBitMask = 0;
+        if (_stricmp(psBtn, "none") != 0)
+            ParsePSButtonName(psBtn, &g_panels[i].psButtonByteOff, &g_panels[i].psButtonBitMask);
     }
 }
 
@@ -220,6 +260,87 @@ static bool InitXInput() {
     }
     Log("WARNING: XInput not available — controller support disabled");
     return false;
+}
+
+// --- PS Controller (HID Raw Input) ---
+
+static bool ParsePSButtonName(const char* name, int* outByteOff, BYTE* outBitMask) {
+    if (_stricmp(name, "Circle")   == 0) { *outByteOff = 0; *outBitMask = 0x40; return true; }
+    if (_stricmp(name, "Triangle") == 0) { *outByteOff = 0; *outBitMask = 0x80; return true; }
+    if (_stricmp(name, "Square")   == 0) { *outByteOff = 0; *outBitMask = 0x10; return true; }
+    if (_stricmp(name, "Cross")    == 0) { *outByteOff = 0; *outBitMask = 0x20; return true; }
+    if (_stricmp(name, "L1")       == 0) { *outByteOff = 1; *outBitMask = 0x01; return true; }
+    if (_stricmp(name, "R1")       == 0) { *outByteOff = 1; *outBitMask = 0x02; return true; }
+    if (_stricmp(name, "Share")    == 0) { *outByteOff = 1; *outBitMask = 0x10; return true; }
+    if (_stricmp(name, "Options")  == 0) { *outByteOff = 1; *outBitMask = 0x20; return true; }
+    if (_stricmp(name, "L3")       == 0) { *outByteOff = 1; *outBitMask = 0x40; return true; }
+    if (_stricmp(name, "R3")       == 0) { *outByteOff = 1; *outBitMask = 0x80; return true; }
+    if (_stricmp(name, "PS")       == 0) { *outByteOff = 2; *outBitMask = 0x01; return true; }
+    if (_stricmp(name, "Touchpad") == 0) { *outByteOff = 2; *outBitMask = 0x02; return true; }
+    if (_stricmp(name, "Mute")     == 0) { *outByteOff = 2; *outBitMask = 0x04; return true; }
+    return false;
+}
+
+static void IdentifyHidDevice(HANDLE hDevice) {
+    if (hDevice == g_cachedHidDevice) return;
+    g_cachedHidDevice = hDevice;
+    g_cachedIsSony = false;
+    g_cachedReportOffset = -1;
+
+    RID_DEVICE_INFO info = {};
+    info.cbSize = sizeof(RID_DEVICE_INFO);
+    UINT sz = sizeof(info);
+    if (GetRawInputDeviceInfoA(hDevice, RIDI_DEVICEINFO, &info, &sz) == (UINT)-1) return;
+    if (info.dwType != RIM_TYPEHID) return;
+    if (info.hid.dwVendorId != SONY_VID) return;
+
+    g_cachedIsSony = true;
+    WORD pid = (WORD)info.hid.dwProductId;
+    if (pid == DS4_PID_1 || pid == DS4_PID_2) {
+        g_cachedReportOffset = 5;  // DualShock 4 USB
+    } else if (pid == DS5_PID || pid == DS5_EDGE) {
+        g_cachedReportOffset = 8;  // DualSense USB
+    }
+    Log("HID device identified: VID=%04X PID=%04X → buttons offset=%d",
+        SONY_VID, pid, g_cachedReportOffset);
+}
+
+static void ParseSonyHidReport(LPARAM lParam) {
+    UINT dwSize = 0;
+    GetRawInputData((HRAWINPUT)lParam, RID_INPUT, nullptr, &dwSize, sizeof(RAWINPUTHEADER));
+    if (dwSize == 0 || dwSize > 1024) return;
+
+    BYTE buf[1024];
+    if (GetRawInputData((HRAWINPUT)lParam, RID_INPUT, buf, &dwSize, sizeof(RAWINPUTHEADER)) == (UINT)-1)
+        return;
+
+    RAWINPUT* raw = (RAWINPUT*)buf;
+    if (raw->header.dwType != RIM_TYPEHID) return;
+    if (raw->data.hid.dwCount == 0 || raw->data.hid.dwSizeHid == 0) return;
+
+    IdentifyHidDevice(raw->header.hDevice);
+    if (!g_cachedIsSony || g_cachedReportOffset < 0) return;
+
+    BYTE* report = raw->data.hid.bRawData;
+    DWORD reportLen = raw->data.hid.dwSizeHid;
+
+    // Handle Bluetooth reports with report ID prefix
+    int offset = g_cachedReportOffset;
+    if (reportLen > 40 && report[0] == 0x31) {
+        offset = 9;   // DualSense Bluetooth
+    } else if (reportLen > 40 && report[0] == 0x11) {
+        offset = 7;   // DualShock 4 Bluetooth
+    }
+
+    if ((DWORD)offset >= reportLen) return;
+
+    // Cache all 3 button bytes in a packed DWORD (atomic write)
+    BYTE b0 = report[offset];
+    BYTE b1 = ((DWORD)(offset + 1) < reportLen) ? report[offset + 1] : 0;
+    BYTE b2 = ((DWORD)(offset + 2) < reportLen) ? report[offset + 2] : 0;
+    LONG packed = (LONG)(b0 | (b1 << 8) | (b2 << 16));
+    InterlockedExchange(&g_hidButtonsPacked, packed);
+    g_hidConnected = true;
 }
 
 // Check if the game is in a safe state for opening panels.
@@ -873,6 +994,10 @@ static LRESULT CALLBACK HookedWndProc(HWND hwnd, UINT msg,
         g_currentPanel = -1;
         g_panelConfirmedOpen = false;
     }
+    // Parse PS controller HID reports (don't consume — let game process it too)
+    if (msg == WM_INPUT) {
+        ParseSonyHidReport(lParam);
+    }
     return CallWindowProcA(g_originalWndProc, hwnd, msg, wParam, lParam);
 }
 
@@ -1111,9 +1236,47 @@ static DWORD WINAPI InputThread(LPVOID) {
                         if (g_panels[i].controllerButton == 0) continue;
                         if (!(pressed & g_panels[i].controllerButton)) continue;
                         HandlePanelAction(i);
+                        actionTaken = true;
                         break;
                     }
                 }
+            }
+        }
+
+        // --- PS Controller polling (HID Raw Input) ---
+        if (!actionTaken && g_controllerEnabled && g_hidConnected) {
+            static bool g_psWasDown[32] = {};
+
+            LONG packed = InterlockedCompareExchange(&g_hidButtonsPacked, 0, 0);
+            BYTE hb[3] = {
+                (BYTE)(packed & 0xFF),
+                (BYTE)((packed >> 8) & 0xFF),
+                (BYTE)((packed >> 16) & 0xFF)
+            };
+
+            // Modifier check: must be held if configured
+            bool psModOk = true;
+            if (g_psModifierEnabled) {
+                psModOk = (hb[g_psModifierByteOff] & g_psModifierBitMask) != 0;
+            }
+
+            if (psModOk) {
+                for (int i = 0; i < NUM_PANELS; i++) {
+                    if (g_panels[i].psButtonByteOff < 0) continue;
+                    bool isDown = (hb[g_panels[i].psButtonByteOff] & g_panels[i].psButtonBitMask) != 0;
+
+                    if (isDown && !g_psWasDown[i]) {
+                        g_psWasDown[i] = true;
+                        HandlePanelAction(i);
+                        break;
+                    } else if (!isDown) {
+                        g_psWasDown[i] = false;
+                    }
+                }
+            } else {
+                // Modifier not held — reset all edge states
+                for (int i = 0; i < NUM_PANELS; i++)
+                    g_psWasDown[i] = false;
             }
         }
     }
@@ -1168,7 +1331,7 @@ static DWORD WINAPI ModThread(LPVOID) {
 
     if (g_controllerEnabled) InitXInput();
 
-    Log("=== Quick Menu Hotkeys v1.9.4 ===");
+    Log("=== Quick Menu Hotkeys v1.10 ===");
 
     g_gameBase = (uintptr_t)GetModuleHandleA("CrimsonDesert.exe");
     if (!g_gameBase) { Log("ERROR: CrimsonDesert.exe not found"); return 0; }
@@ -1249,6 +1412,21 @@ static DWORD WINAPI ModThread(LPVOID) {
         return 0;
     }
 
+    // Register for HID Gamepad raw input (PS5/PS4 native support)
+    RAWINPUTDEVICE rid[2] = {};
+    rid[0].usUsagePage = 0x01;
+    rid[0].usUsage     = 0x05;  // Game Pad
+    rid[0].dwFlags     = RIDEV_INPUTSINK;
+    rid[0].hwndTarget  = g_gameWindow;
+    rid[1].usUsagePage = 0x01;
+    rid[1].usUsage     = 0x04;  // Joystick
+    rid[1].dwFlags     = RIDEV_INPUTSINK;
+    rid[1].hwndTarget  = g_gameWindow;
+    if (RegisterRawInputDevices(rid, 2, sizeof(RAWINPUTDEVICE)))
+        Log("Raw Input: registered for HID GamePad + Joystick");
+    else
+        Log("Raw Input: RegisterRawInputDevices FAILED (error=%lu)", GetLastError());
+
     g_ready = true;
     CreateThread(nullptr, 0, InputThread, nullptr, 0, nullptr);
     if (g_debugLog)
@@ -1282,6 +1460,23 @@ static DWORD WINAPI ModThread(LPVOID) {
             if (g_panels[i].controllerButton != 0)
                 Log("  [%s] %s = 0x%04X", g_panels[i].section,
                     g_panels[i].panelName, g_panels[i].controllerButton);
+        }
+    }
+    // PS Controller binding summary
+    {
+        bool hasAnyPS = false;
+        for (int i = 0; i < NUM_PANELS; i++) {
+            if (g_panels[i].psButtonByteOff >= 0) { hasAnyPS = true; break; }
+        }
+        if (hasAnyPS) {
+            Log("--- PS Controller Bindings (native HID) ---");
+            if (g_psModifierEnabled)
+                Log("  PSModifier: byteOff=%d mask=0x%02X", g_psModifierByteOff, g_psModifierBitMask);
+            for (int i = 0; i < NUM_PANELS; i++) {
+                if (g_panels[i].psButtonByteOff >= 0)
+                    Log("  [%s] PSButton: byteOff=%d mask=0x%02X",
+                        g_panels[i].section, g_panels[i].psButtonByteOff, g_panels[i].psButtonBitMask);
+            }
         }
     }
     Log("--- Mod ready! PanelManager: %s ---",
