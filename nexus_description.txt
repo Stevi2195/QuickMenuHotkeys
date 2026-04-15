@@ -46,7 +46,7 @@ These panels have no hotkey assigned by default. You can bind them to any key th
 [*][b]Direct internal calls:[/b] Opens panels by calling the game's internal panel functions directly instead of simulating menu navigation.
 [*][b]Override game keys:[/b] When you remap a hotkey (e.g. Inventory from I to Tab), the game's hardcoded keybind for that key is automatically disabled — freeing it for other in-game actions like abilities.
 [*][b]Xbox / XInput controller:[/b] Assign controller buttons to any panel via XInput. Supports an optional modifier button (e.g. hold LB + press D-Pad). Works with Xbox controllers natively and all other controllers through Steam Input.
-[*][b]PS5 / PS4 controller:[/b] Native HID support for DualSense and DualShock 4 — no Steam Input required. Configurable PSButton per panel and optional PSModifier (e.g. hold L1 + press Cross)
+[*][b]PS5 / PS4 controller:[/b] Native HID support for DualSense and DualShock 4 — no Steam Input required. Configurable PSButton per panel and optional PSModifier (e.g. hold L1 + press Cross). D-Pad buttons supported (DPadUp, DPadDown, DPadLeft, DPadRight).
 [*][b]Keyboard modifiers:[/b] Bind multiple panels to the same key with different modifiers (e.g. Shift+J for Faction Quests, Ctrl+J for Challenges).
 [*][b]Crash protection:[/b] If a game update breaks the hook, the mod disables itself instead of crashing the game.
 [/list]
@@ -170,7 +170,7 @@ PSButton=Square          ; L1 + Square opens Quest Book
 [Map]
 PSButton=Triangle        ; L1 + Triangle opens Map[/code]
 
-[b]Supported PSButton values:[/b] Circle, Triangle, Square, Cross, L1, R1, L3, R3, Share, Options, Touchpad, PS, Mute (case-insensitive, "none" to disable)
+[b]Supported PSButton values:[/b] Circle, Triangle, Square, Cross, L1, R1, L3, R3, Share, Options, Touchpad, PS, Mute, DPadUp, DPadDown, DPadLeft, DPadRight (case-insensitive, "none" to disable)
 
 Supports DualSense, DualSense Edge, and DualShock 4 v1/v2.
 
@@ -183,6 +183,11 @@ Delete [b]QuickMenuHotkeys.asi[/b] and [b]QuickMenuHotkeys.ini[/b] from the game
 [line]
 
 [size=3][b]Changelog[/b][/size]
+
+[b]v1.10.1[/b]
+[list]
+[*]Added: D-Pad support for PS controllers in Native HID mode (DPadUp, DPadDown, DPadLeft, DPadRight as PSButton values)
+[/list]
 
 [b]v1.10[/b]
 [list]
@@ -289,3 +294,5 @@ Delete [b]QuickMenuHotkeys.asi[/b] and [b]QuickMenuHotkeys.ini[/b] from the game
 [size=3][b]Also check out[/b][/size]
 
 [url=https://www.nexusmods.com/crimsondesert/mods/388][b]Private Storage Anywhere[/b][/url] — Open your Private Storage from anywhere with a single hotkey or controller button. No need to walk back to your camp chest. Fully compatible with Quick Menu Hotkeys — use Shift+I for storage and plain I for inventory.
+
+[url=https://www.nexusmods.com/crimsondesert/mods/1020][b]FasterSkillPoints[/b][/url] — Reduce the experience threshold for skill-point level-ups. Configurable speedup from 2x to 128x via a simple INI setting.

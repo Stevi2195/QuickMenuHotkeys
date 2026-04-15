@@ -64,7 +64,7 @@ struct PanelBinding {
     DWORD       key;
     DWORD       modifierKey;       // Keyboard modifier (Shift/Ctrl/Alt), 0 = none
     WORD        controllerButton;  // XInput button bitmask (0 = disabled)
-    int         psButtonByteOff;   // HID button byte offset (0-2), -1 = disabled
+    int         psButtonByteOff;   // HID button byte offset (0-3), -1 = disabled
     BYTE        psButtonBitMask;   // HID button bit mask
 };
 
@@ -278,6 +278,11 @@ static bool ParsePSButtonName(const char* name, int* outByteOff, BYTE* outBitMas
     if (_stricmp(name, "PS")       == 0) { *outByteOff = 2; *outBitMask = 0x01; return true; }
     if (_stricmp(name, "Touchpad") == 0) { *outByteOff = 2; *outBitMask = 0x02; return true; }
     if (_stricmp(name, "Mute")     == 0) { *outByteOff = 2; *outBitMask = 0x04; return true; }
+    // D-Pad via hat-switch (virtual bits in byte 3)
+    if (_stricmp(name, "DPadUp")    == 0) { *outByteOff = 3; *outBitMask = 0x01; return true; }
+    if (_stricmp(name, "DPadDown")  == 0) { *outByteOff = 3; *outBitMask = 0x02; return true; }
+    if (_stricmp(name, "DPadLeft")  == 0) { *outByteOff = 3; *outBitMask = 0x04; return true; }
+    if (_stricmp(name, "DPadRight") == 0) { *outByteOff = 3; *outBitMask = 0x08; return true; }
     return false;
 }
 
@@ -334,11 +339,18 @@ static void ParseSonyHidReport(LPARAM lParam) {
 
     if ((DWORD)offset >= reportLen) return;
 
-    // Cache all 3 button bytes in a packed DWORD (atomic write)
+    // Cache all 3 button bytes + virtual D-Pad bits in a packed DWORD (atomic write)
     BYTE b0 = report[offset];
     BYTE b1 = ((DWORD)(offset + 1) < reportLen) ? report[offset + 1] : 0;
     BYTE b2 = ((DWORD)(offset + 2) < reportLen) ? report[offset + 2] : 0;
-    LONG packed = (LONG)(b0 | (b1 << 8) | (b2 << 16));
+    // D-Pad: lower nibble of b0 is a hat-switch (0-7 = directions, 8 = neutral)
+    BYTE hat = b0 & 0x0F;
+    static const BYTE hatToDpad[9] = {
+        0x01, 0x09, 0x08, 0x0A, 0x02, 0x06, 0x04, 0x05, 0x00
+    //  Up    UpR   Right DnR   Down  DnL   Left  UpL   Neutral
+    };
+    BYTE dpad = (hat <= 8) ? hatToDpad[hat] : 0;
+    LONG packed = (LONG)(b0 | (b1 << 8) | (b2 << 16) | (dpad << 24));
     InterlockedExchange(&g_hidButtonsPacked, packed);
     g_hidConnected = true;
 }
@@ -1248,10 +1260,11 @@ static DWORD WINAPI InputThread(LPVOID) {
             static bool g_psWasDown[32] = {};
 
             LONG packed = InterlockedCompareExchange(&g_hidButtonsPacked, 0, 0);
-            BYTE hb[3] = {
+            BYTE hb[4] = {
                 (BYTE)(packed & 0xFF),
                 (BYTE)((packed >> 8) & 0xFF),
-                (BYTE)((packed >> 16) & 0xFF)
+                (BYTE)((packed >> 16) & 0xFF),
+                (BYTE)((packed >> 24) & 0xFF)
             };
 
             // Modifier check: must be held if configured

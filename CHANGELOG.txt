@@ -1,5 +1,8 @@
 Quick Menu Hotkeys - Changelog
 
+== v1.10.1 (2026-04-15) ==
+- Added: D-Pad support for PS controllers in Native HID mode (DPadUp, DPadDown, DPadLeft, DPadRight as PSButton values)
+
 == v1.10 (2026-04-08) ==
 - New: Native PS5/PS4 controller support via HID Raw Input (DualSense, DualSense Edge, DualShock 4)
 - Fixed: Pressing a hotkey after the game closed a panel (e.g. using an item) no longer requires a double press. The mod now verifies the panel's state flag at key-press time before deciding to toggle-close.
