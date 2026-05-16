@@ -47,6 +47,7 @@ These panels have no hotkey assigned by default. You can bind them to any key th
 [*][b]Override game keys:[/b] When you remap a hotkey (e.g. Inventory from I to Tab), the game's hardcoded keybind for that key is automatically disabled — freeing it for other in-game actions like abilities.
 [*][b]Xbox / XInput controller:[/b] Assign controller buttons to any panel via XInput. Supports an optional modifier button (e.g. hold LB + press D-Pad). Works with Xbox controllers natively and all other controllers through Steam Input.
 [*][b]PS5 / PS4 controller:[/b] Native HID support for DualSense and DualShock 4 — no Steam Input required. Configurable PSButton per panel and optional PSModifier (e.g. hold L1 + press Cross). D-Pad buttons supported (DPadUp, DPadDown, DPadLeft, DPadRight).
+[*][b]No double-trigger on modifier combos:[/b] When a controller modifier is held (e.g. LB / L1), the bound panel button is masked from the game so the same press doesn't also fire the default action (consume item, etc.). The modifier itself stays active.
 [*][b]Keyboard modifiers:[/b] Bind multiple panels to the same key with different modifiers (e.g. Shift+J for Faction Quests, Ctrl+J for Challenges).
 [*][b]Crash protection:[/b] If a game update breaks the hook, the mod disables itself instead of crashing the game.
 [/list]
@@ -183,6 +184,30 @@ Delete [b]QuickMenuHotkeys.asi[/b] and [b]QuickMenuHotkeys.ini[/b] from the game
 [line]
 
 [size=3][b]Changelog[/b][/size]
+
+[b]v1.10.4[/b]
+[list]
+[*]Updated for game version [b]1.07.00[/b] (2026-05-16). Fixes the instant crash that occurred when pressing the Pet hotkey — two hardcoded helper addresses used by the post-open sub-tab switch were valid for 1.06.00 but pointed at unrelated code in 1.07.00, taking down the game on the very first call.
+[*]New: helper addresses (FindPanelTop, SetSubTab) are now resolved dynamically by scanning OpenPanel's body — survives future address shuffles.
+[*]Hardened: if either helper cannot be located, the sub-tab post-switch is silently skipped instead of crashing.
+[/list]
+
+[b]v1.10.3[/b]
+[list]
+[*]Updated for game version [b]1.06.00[/b] (2026-05-11). All panel hotkeys, toggle-close, and proactive PanelManager resolution work again after the update shifted internal addresses (OpenPanel, FindPanel, panel-state offsets).
+[*]Fixed: instruction-length decoder now recognizes the 2-byte alignment NOP ([b]66 90[/b]) so hooks no longer abort when a function prolog starts with operand-size-prefixed padding.
+[*]Improved: OpenPanel/FindPanel disambiguation — when the cross-reference scan finds both candidates with the same match score, the heuristic now checks which one calls the other (OpenPanel calls FindPanel internally) and swaps roles if needed. Prevents the hook from being installed on the wrong function after future shuffles.
+[*]New: BlockOverlappingInputs — while a controller modifier is held, bound panel buttons are masked from the game so the same press doesn't trigger both the panel hotkey and the default in-game action (e.g. L1 + D-Pad Right opening the menu while also consuming an item). XInput + native HID paths covered. The modifier itself is preserved.
+[*]Hardened against edge-triggered game actions (horse whistle on D-Pad Up etc.) — bound buttons are delayed by one polling tick so the modifier has time to register, blocking single-frame leaks that were enough to fire instant actions even though hold-actions like consume-item were already covered.
+[*]Improved: XInput init reuses the XInput DLL the game already loaded (instead of always loading xinput1_4.dll), so the block hook covers the game's actual calls.
+[/list]
+
+[b]v1.10.2[/b]
+[list]
+[*]Updated for game version 1.0.4.1 (2026-04-23) — struct layout, sub-mode values, and PanelManager load pattern changed; scanners re-adapted. All panel hotkeys, toggle-close, and proactive PanelManager resolution work as before.
+[*]Improved: Menu-state pointer and PanelManager chain are now resolved dynamically via byte-pattern anchors instead of a fixed CALL-target heuristic — survives future updates that shift register usage or offsets
+[*]Improved: Hook installer detects and follows [b]FF 25[/b] / [b]E9[/b] redirect thunks on the hook target, preventing trampoline corruption if a future update inserts a thunk at the OpenPanel address
+[/list]
 
 [b]v1.10.1[/b]
 [list]

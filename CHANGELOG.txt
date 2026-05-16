@@ -1,5 +1,23 @@
 Quick Menu Hotkeys - Changelog
 
+== v1.10.4 (2026-05-16) ==
+- Updated for game version 1.07.00 (2026-05-16). Fixes the instant crash that occurred when the Pet hotkey was pressed: the post-open sub-tab switch used two hardcoded helper addresses (FindPanelTop, SetSubTab) that were valid for the 1.06.00 build but pointed at unrelated code in 1.07.00, taking down the game on the very first call.
+- New: helper addresses are now resolved dynamically by scanning OpenPanel's body. FindPanelTop is identified as the first CALL following the LEA RDX = "MainMenuView2" string load; SetSubTab is identified by its unique argument-setup signature (XOR R9D/R8D + MOV EDX,[reg+0x1AC] + CALL). Survives future address shuffles.
+- Hardened: if either helper cannot be located, the sub-tab post-switch is silently skipped instead of crashing — the panel still opens at the game-default sub-tab.
+
+== v1.10.3 (2026-05-11) ==
+- Updated for game version 1.06.00 (2026-05-11). All panel hotkeys, toggle-close, and proactive PanelManager resolution work again after the update shifted internal addresses (OpenPanel, FindPanel, panel-state offsets).
+- Fixed: Instruction-length decoder now recognizes the 2-byte alignment NOP (66 90) so hooks no longer abort when a function prolog starts with operand-size-prefixed padding.
+- Improved: OpenPanel/FindPanel disambiguation — when the cross-reference scan finds both candidates with the same match score, the heuristic now checks which one calls the other (OpenPanel calls FindPanel internally) and swaps roles if needed. Prevents the hook from being installed on the wrong function after future shuffles.
+- New: BlockOverlappingInputs (default ON) — when a controller modifier (ControllerModifier / PSModifier) is held, the bound panel buttons are masked out of the data the game sees. Prevents the same press from triggering both the panel hotkey and the default in-game action (e.g. L1 + D-Pad Right opening a menu while also consuming an item). The modifier button itself is preserved so its game function (e.g. LB = block) keeps working. XInput path covers Xbox + Steam-Input-translated controllers; native HID path covers DualSense / DualShock 4 directly.
+- Hardened: bound buttons are now delayed by one polling tick (~16 ms) so the modifier has time to register before edge-triggered game actions fire (horse whistle on D-Pad Up, etc.). Catches both the press-edge race (panel button hits a frame before modifier) and the release-glitch (modifier lifted a frame before panel button). Single taps on bound buttons still reach the game, just one tick later — imperceptible.
+- Improved: XInput init now reuses an XInput DLL the game already loaded rather than always loading xinput1_4.dll, so input-block hooks always sit on the same module the game's calls go through.
+
+== v1.10.2 (2026-04-23) ==
+- Updated for game version 1.0.4.1 (2026-04-23) — struct layout, sub-mode values, and PanelManager load pattern changed; scanners re-adapted. All panel hotkeys, toggle-close, and proactive PanelManager resolution work as before.
+- Improved: Menu-state pointer and PanelManager chain are now resolved dynamically via byte-pattern anchors instead of a fixed CALL-target heuristic — survives future updates that shift register usage or offsets.
+- Improved: Hook installer detects and follows `FF 25` / `E9` redirect thunks on the hook target, preventing trampoline corruption if a future update inserts a thunk at the OpenPanel address.
+
 == v1.10.1 (2026-04-15) ==
 - Added: D-Pad support for PS controllers in Native HID mode (DPadUp, DPadDown, DPadLeft, DPadRight as PSButton values)
 
