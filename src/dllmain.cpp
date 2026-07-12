@@ -5,7 +5,7 @@
 #include <string>
 
 // ============================================================
-//  Quick Menu Hotkeys v1.10.4 — Cross-Reference Pattern Scanner
+//  Quick Menu Hotkeys v1.10.6 — Cross-Reference Pattern Scanner
 //
 //  Finds the OpenPanel function by cross-referencing multiple
 //  known panel name strings. The common CALL target across
@@ -35,6 +35,19 @@ static uintptr_t g_r8DataAddr     = 0;
 static uintptr_t g_pmGlobalAddr = 0;
 static int g_pmOffset1 = 0;
 static int g_pmOffset2 = 0;
+
+// PanelManager-chain state. The chain is derived statically from the binary at
+// boot (FindPmChainStatic); if that fails it is learned from the first live pm
+// (LearnPmChainCandidate/ValidatePmChain). Either way it stays live-validated
+// and nothing is persisted — each launch re-derives it from the current binary,
+// so a game update that shifts the offsets is handled automatically.
+static int  g_pmChainCandA   = -1;
+static int  g_pmChainCandB   = -1;
+static int  g_pmChainAgree   = 0;
+static int  g_pmChainZeroReads = 0;    // consecutive null reads on an unproven chain
+static bool g_pmChainLearned = false;  // g_pmOffset1/2 came from static scan or learner
+
+static char g_iniPath[MAX_PATH] = {};
 
 // Debug: capture panel names
 static volatile LONGLONG g_lastRDX = 0;
@@ -128,6 +141,8 @@ static uintptr_t g_modalTrampoline = 0;
 // OpenPanel detour: trampoline to original function
 static uintptr_t g_openPanelTrampoline = 0;
 static volatile bool g_ourCall = false;
+static volatile bool g_ourCallCrashed = false;  // set by the detour's SEH when
+                                                // a mod-initiated open crashed
 
 // --- XInput (dynamic loading) ---
 struct XINPUT_GAMEPAD_LOCAL {
@@ -469,9 +484,18 @@ static void ParseSonyHidReport(LPARAM lParam) {
     g_hidConnected = true;
 }
 
+// mainChar mode/sub-mode/subtype-array offsets. Defaults match the pre-July-2026
+// struct layout (game <= 1.12); FindModeOffsets() re-derives them at init from
+// the ModeSwitcher function, because the block shifts between game updates
+// (July 2026 / 1.13 moved it by -8: mode 0xCA8->0xCA0, sub 0xCA9->0xCA1,
+// subtype array 0xCB8->0xCB0).
+static uint32_t g_offModeByte = 0xCA8;  // mainChar+N: u8 current mode (4 = ingame)
+static uint32_t g_offSubByte  = 0xCA9;  // mainChar+N: u8 current sub-mode
+static uint32_t g_offSubtypes = 0xCB8;  // mainChar+N: 16-slot panel-state flag array
+
 // Check if the game is in a safe state for opening panels.
 // Blocks during cutscenes, QTEs, minigames, and the in-game menu.
-// Sub-mode at mc+0xCA9 (post Apr-23 2026 game update 1.0.4.1):
+// Sub-mode values (stable across 1.0.4.1 .. 1.13, only their OFFSET moves):
 //   0x06=cinema, 0x07=qte, 0x08=minigame  → UNSAFE
 //   0x0D = gameplay variant (also seen while a mod-opened panel is active) → SAFE
 //   0x0E = ingamemenu (pre-Apr-23 this was gameplay)  → UNSAFE
@@ -479,6 +503,9 @@ static void ParseSonyHidReport(LPARAM lParam) {
 //   0x10 = hud-info + hud-play + interaction + quickslot (interaction target) → SAFE
 // 0x0E is the single problematic gameplay-looking value after the update, so
 // whitelist gameplay values explicitly rather than using a single threshold.
+// The sub-mode byte is only meaningful while mode==4 (ingame-global); without
+// the mode check a loading screen passes (mode=0 but sub still holds a stale
+// 0x0F from the previous gameplay frame).
 static bool IsGameplayState() {
     if (g_pmGlobalAddr == 0) return true;  // can't check, assume safe
     __try {
@@ -486,9 +513,11 @@ static bool IsGameplayState() {
         if (!root) return true;
         uintptr_t mc = *(uintptr_t*)(root + 0x48);
         if (!mc) return true;
-        uint8_t subtype = *(uint8_t*)(mc + 0xCA9);
-        if (subtype == 0x0D || subtype == 0x0F || subtype == 0x10) return true;
-        Log("[Safety] Blocked: unsafe state (subtype=0x%02X)", subtype);
+        uint8_t mode    = *(uint8_t*)(mc + g_offModeByte);
+        uint8_t subtype = *(uint8_t*)(mc + g_offSubByte);
+        if (mode == 4 &&
+            (subtype == 0x0D || subtype == 0x0F || subtype == 0x10)) return true;
+        Log("[Safety] Blocked: unsafe state (mode=0x%02X subtype=0x%02X)", mode, subtype);
         return false;
     } __except(EXCEPTION_EXECUTE_HANDLER) {}
     return true;
@@ -516,9 +545,10 @@ static void ClearMenuStateFlags() {
     }
 }
 
-// Check if any panel-state flag in the 16-byte slot array at mc+0xCB8 is set.
+// Check if any panel-state flag in the 16-byte slot array at mc+g_offSubtypes
+// is set (0xCB8 pre-1.13, 0xCB0 on 1.13 — resolved by FindModeOffsets).
 // Used at key-press time to verify some panel is still open before toggle-close.
-// Post Apr-23 2026 update: single-byte check on flag1 (mc+0xCC5) became unreliable
+// Post Apr-23 2026 update: single-byte check on flag1 (slot 0x0D) became unreliable
 // (transient slot). The scanned flag offsets (g_flagOffset1/g_flagOffset2) both
 // fall inside this 16-byte array — scanning the whole array covers every panel.
 static bool IsPanelFlagSet() {
@@ -528,7 +558,7 @@ static bool IsPanelFlagSet() {
         if (!root) return false;
         uintptr_t mc = *(uintptr_t*)(root + 0x48);
         if (!mc) return false;
-        volatile uint8_t* arr = (volatile uint8_t*)(mc + 0xCB8);
+        volatile uint8_t* arr = (volatile uint8_t*)(mc + g_offSubtypes);
         for (int i = 0; i < 16; i++) {
             if (arr[i] != 0) return true;
         }
@@ -1109,6 +1139,12 @@ static bool ReadPanelManagerFromGlobal() {
         if (!ptr) return false;
         ptr = *(uintptr_t*)ptr;
         if (ptr) {
+            // Learned/seeded chains (unlike the static-scan chain) may be
+            // stale after a game update — reject implausible values instead
+            // of handing a garbage pointer to OpenPanel.
+            if (g_pmChainLearned &&
+                ((ptr & 0x7) || ptr < 0x10000 || ptr > 0x00007FFFFFFFFFFF))
+                return false;
             g_panelManager = (LONGLONG)ptr;
             return true;
         }
@@ -1196,6 +1232,242 @@ static int InstrLen(BYTE* ip) {
 //  Hook Installation
 // ============================================================
 
+static bool SafeReadPtr(uintptr_t addr, uintptr_t* out) {
+    __try { *out = *(uintptr_t*)addr; return true; }
+    __except(EXCEPTION_EXECUTE_HANDLER) { return false; }
+}
+
+// The July 2026 (1.13) build dropped the static PanelManager load idiom that
+// FindPanelManagerChain matches — callers now fetch pm through per-object
+// virtual getters (vtable+0x108), so no image-wide byte pattern exists anymore.
+// Fallback, driven entirely from the OpenPanel hook (game thread, so no
+// synchronization needed): search the known root singleton (g_pmGlobalAddr,
+// same global the flag chain resolved) for a root->+A->+B->deref chain that
+// yields the live pm. A match is only a CANDIDATE — it could be a transient
+// object that coincidentally points at pm right now. It is promoted into
+// g_pmOffset1/2 (re-enabling ReadPanelManagerFromGlobal's stale-pointer
+// protection) only after agreeing with the live pm on 3 separate captures,
+// and demoted again on any divergence or panel-call crash. Same
+// N-consecutive-sightings pattern as the container-vtable auto-relearn in
+// Private Storage Anywhere. State lives in the globals block up top
+// (g_pmChainCandA/B, g_pmChainAgree, g_pmChainLearned).
+
+// --- Static PanelManager-chain derivation (byte-pattern, boot time) ---------
+// 1.13 dropped the old load idiom that FindPanelManagerChain matched, but the
+// chain is still derivable statically from a different anchor: FindPanelTop
+// (already resolved via the "MainMenuView2" xref) is called at a handful of
+// sites with its 1st argument loaded as  rcx = [[[root_global + A] + B]]  and
+// a panel-name string in rdx. Scanning FindPanelTop's call sites for that
+// compact 3-MOV chain (preceded by a RIP-load of the root global) recovers
+// (A,B) with no runtime learning and no persistence — same "read it fresh
+// from the binary every boot" model the mod used before 1.13. Verified on
+// 1.13.01: exactly 4 sites, all agreeing on +0x68/+0x68.
+
+// modrm reg/rm register numbers, folding in REX.R / REX.B extension bits.
+static inline int PmModDest(BYTE rex, BYTE m) { return (((rex>>2)&1)<<3) | ((m>>3)&7); }
+static inline int PmModBase(BYTE rex, BYTE m) { return ((rex&1)<<3) | (m&7); }
+
+// mov r64,[r64+disp8]  =  REX.W(48/49/4C/4D) 8B modrm(mod=01,rm!=100) disp8.
+// Reports the disp8, instruction length, and both register numbers so the
+// caller can verify the load chains register-to-register.
+static bool PmMovLoadDisp8(const BYTE* p, int* disp, int* len,
+                           int* destReg, int* baseReg) {
+    BYTE rex = p[0];
+    if (rex!=0x48 && rex!=0x4C && rex!=0x49 && rex!=0x4D) return false;
+    if (p[1]!=0x8B) return false;
+    BYTE m = p[2];
+    if ((m & 0xC0)!=0x40) return false;      // mod=01 (disp8)
+    if ((m & 0x07)==0x04) return false;       // rm=100 -> SIB, skip
+    *destReg = PmModDest(rex, m);
+    *baseReg = PmModBase(rex, m);
+    *disp = (int)(unsigned char)p[3];         // field offsets are 0..0x7F
+    *len = 4;
+    return true;
+}
+// mov r64,[r64]  =  REX.W 8B modrm(mod=00, rm!=100/101)
+static bool PmMovLoadDeref(const BYTE* p, int* destReg, int* baseReg) {
+    BYTE rex = p[0];
+    if (rex!=0x48 && rex!=0x4C && rex!=0x49 && rex!=0x4D) return false;
+    if (p[1]!=0x8B) return false;
+    BYTE m = p[2];
+    if ((m & 0xC0)!=0x00) return false;
+    if ((m & 0x07)==0x04 || (m & 0x07)==0x05) return false;
+    *destReg = PmModDest(rex, m);
+    *baseReg = PmModBase(rex, m);
+    return true;
+}
+// Is there a  mov <wantReg>,[rip+disp32]->root_global  in [lo,hi)?
+// (data-flow: the chain's first base register must actually come from root.)
+static bool PmHasRootLoadInto(const BYTE* base, DWORD lo, DWORD hi, int wantReg) {
+    for (DWORD p = lo; p + 6 < hi; p++) {
+        BYTE rex = base[p];
+        if ((rex==0x48 || rex==0x4C) && base[p+1]==0x8B &&
+            (base[p+2] & 0xC7)==0x05) {
+            if (PmModDest(rex, base[p+2]) != wantReg) continue;
+            int32_t d = *(int32_t*)(base + p + 3);
+            if (g_gameBase + p + 7 + d == g_pmGlobalAddr) return true;
+        }
+    }
+    return false;
+}
+
+// Derive g_pmOffset1/2 statically. Returns true on a confident match.
+static bool FindPmChainStatic() {
+    if (g_pmGlobalAddr == 0 || g_findPanelTopAddr == 0) return false;
+    const BYTE* base = (const BYTE*)g_gameBase;
+    const DWORD WIN = 0x60;
+    struct { int a, b, count; } votes[16];
+    int nv = 0;
+
+    for (DWORD i = 0; i + 5 <= g_imageSize; i++) {
+        if (base[i] != 0xE8) continue;
+        int32_t rel = *(int32_t*)(base + i + 1);
+        if (g_gameBase + i + 5 + rel != g_findPanelTopAddr) continue;
+
+        DWORD lo = (i >= WIN) ? i - WIN : 0;
+        for (DWORD p = lo; p + 6 < i; p++) {
+            int a, la, b, lb, d1, b1, d2, b2, d3, b3;
+            if (!PmMovLoadDisp8(base + p, &a, &la, &d1, &b1)) continue;
+            if (!PmMovLoadDisp8(base + p + la, &b, &lb, &d2, &b2)) continue;
+            if (b2 != d1) continue;                         // mov2 base == mov1 dest
+            if (!PmMovLoadDeref(base + p + la + lb, &d3, &b3)) continue;
+            if (b3 != d2) continue;                         // mov3 base == mov2 dest
+            if (a <= 0 || b <= 0) continue;                 // real field offsets, and
+                                                            // b>0 keeps off2 off the
+                                                            // g_pmOffset2==0 sentinel
+            if (!PmHasRootLoadInto(base, lo, p + 1, b1)) continue;  // mov1 base <- root
+            // record one vote for (a,b), then move to the next call site
+            int slot = -1;
+            for (int v = 0; v < nv; v++)
+                if (votes[v].a == a && votes[v].b == b) { slot = v; break; }
+            if (slot < 0 && nv < 16) { slot = nv++; votes[slot].a = a; votes[slot].b = b; votes[slot].count = 0; }
+            if (slot >= 0) votes[slot].count++;
+            break;
+        }
+    }
+
+    int best = -1, total = 0;
+    for (int v = 0; v < nv; v++) {
+        total += votes[v].count;
+        if (best < 0 || votes[v].count > votes[best].count) best = v;
+    }
+    if (best < 0) {
+        Log("[PmChain] static scan: no FindPanelTop chain anchor found");
+        return false;
+    }
+    g_pmOffset1 = votes[best].a;
+    g_pmOffset2 = votes[best].b;
+    g_pmChainLearned = true;   // still live-validated by ValidatePmChain
+    Log("[PmChain] static scan OK: [global]->+0x%X->+0x%X->deref (%d/%d anchor sites)",
+        votes[best].a, votes[best].b, votes[best].count, total);
+    return true;
+}
+
+// SEH-guarded read of the full candidate chain; 0 on any missing link.
+static LONGLONG ReadChainPm(int a, int b) {
+    uintptr_t root = 0, t1 = 0, t2 = 0, v = 0;
+    if (!SafeReadPtr(g_pmGlobalAddr, &root) || !root) return 0;
+    if (!SafeReadPtr(root + a, &t1) || !t1) return 0;
+    if (!SafeReadPtr(t1 + b, &t2) || !t2) return 0;
+    if (!SafeReadPtr(t2, &v)) return 0;
+    return (LONGLONG)v;
+}
+
+// Drop the active chain (static-derived or live-learned) back to hook capture.
+// In-memory only — nothing is persisted, so the next boot re-derives the chain
+// statically from the binary again (self-correcting across game updates).
+static void DemotePmChain(const char* why) {
+    if (!g_pmChainLearned) return;
+    Log("[PmChain] %s — demoted, back to hook capture", why);
+    g_pmOffset2 = 0;
+    g_pmChainLearned = false;
+    g_pmChainCandA = g_pmChainCandB = -1;
+    g_pmChainAgree = 0;
+    g_pmChainZeroReads = 0;
+}
+
+// Scan for a new candidate chain. b starts at 8: b==0 would collide with the
+// codebase-wide "no chain" sentinel g_pmOffset2==0 once promoted. Ascending
+// scan finds the smallest (real) offsets first; a plausibility filter skips
+// unaligned/non-canonical pointers.
+static void LearnPmChainCandidate(LONGLONG pm) {
+    uintptr_t root = 0;
+    if (!SafeReadPtr(g_pmGlobalAddr, &root) || !root) return;
+    for (int a = 0; a <= 0x180; a += 8) {
+        uintptr_t t1 = 0;
+        if (!SafeReadPtr(root + a, &t1)) continue;
+        if (!t1 || (t1 & 0x7) || t1 < 0x10000 || t1 > 0x00007FFFFFFFFFFF) continue;
+        for (int b = 8; b <= 0x180; b += 8) {
+            uintptr_t t2 = 0;
+            if (!SafeReadPtr(t1 + b, &t2)) break;
+            if (!t2 || (t2 & 0x7) || t2 < 0x10000 || t2 > 0x00007FFFFFFFFFFF) continue;
+            uintptr_t v = 0;
+            if (!SafeReadPtr(t2, &v)) continue;
+            if ((LONGLONG)v == pm) {
+                g_pmChainCandA = a;
+                g_pmChainCandB = b;
+                g_pmChainAgree = 1;
+                Log("[PmChain] candidate [global]->+0x%X->+0x%X->deref (1/3)", a, b);
+                return;
+            }
+        }
+    }
+    static bool s_loggedNoChain = false;
+    if (!s_loggedNoChain) {
+        s_loggedNoChain = true;
+        Log("[PmChain] no static pm chain found near root — hook capture only");
+    }
+}
+
+// Called from the OpenPanel hook on every game-initiated capture.
+static void ValidatePmChain(LONGLONG pm) {
+    if (g_pmGlobalAddr == 0 || pm == 0) return;
+    if (g_pmOffset2 != 0) {
+        // Active chain. Static-scan chains (pre-1.13 builds) are trusted as
+        // before; learned/seeded chains must keep matching the live pm.
+        if (g_pmChainLearned) {
+            LONGLONG v = ReadChainPm(g_pmOffset1, g_pmOffset2);
+            if (v == pm) {
+                // Live confirmation of the static-derived (or learned) chain.
+                if (g_pmChainAgree == 0)
+                    Log("[PmChain] chain confirmed against live pm");
+                g_pmChainAgree++;
+                g_pmChainZeroReads = 0;
+            } else if (v != 0) {
+                DemotePmChain("chain diverged from live pm");
+            } else if (g_pmChainAgree == 0 && ++g_pmChainZeroReads >= 5) {
+                // A single null read is no verdict (chain links may not be
+                // constructed during loading / UI rebuild). But an UNPROVEN
+                // chain that never resolves across 5 captures — while panels
+                // are demonstrably opening — is stale (a wrong static match or
+                // a post-update layout change). Demote so candidate learning
+                // can find the real chain from the live pm.
+                DemotePmChain("chain never resolved across 5 captures");
+            }
+        }
+        return;
+    }
+    if (g_pmChainCandA >= 0) {
+        if (ReadChainPm(g_pmChainCandA, g_pmChainCandB) == pm) {
+            if (++g_pmChainAgree >= 3) {
+                g_pmOffset1 = g_pmChainCandA;
+                g_pmOffset2 = g_pmChainCandB;
+                g_pmChainLearned = true;
+                Log("[PmChain] promoted [global]->+0x%X->+0x%X->deref (3 agreements)",
+                    g_pmChainCandA, g_pmChainCandB);
+            } else {
+                Log("[PmChain] candidate agreed (%d/3)", g_pmChainAgree);
+            }
+        } else {
+            g_pmChainCandA = g_pmChainCandB = -1;
+            g_pmChainAgree = 0;
+            LearnPmChainCandidate(pm);
+        }
+        return;
+    }
+    LearnPmChainCandidate(pm);
+}
+
 // C detour for OpenPanel — blocks game-triggered opens for remapped panels
 static void __fastcall DetourOpenPanel(LONGLONG pm, const char* panelName, void* data) {
     // First-capture tracking — decides whether to let this call through
@@ -1206,6 +1478,13 @@ static void __fastcall DetourOpenPanel(LONGLONG pm, const char* panelName, void*
     g_panelManager = pm;
     g_lastRDX = (LONGLONG)panelName;
     InterlockedIncrement(&g_hookCounter);
+
+    // 1.13+: no static pm-chain idiom exists in the binary, so learn/validate
+    // one against the live pm (candidate -> 3 agreements -> promoted; demoted
+    // on divergence). Skip the mod's own re-entrant calls — their pm may come
+    // from the chain itself, which would self-confirm.
+    if (!g_ourCall)
+        ValidatePmChain(pm);
 
     // First-hit pass-through: on the very first capture, do NOT block the
     // original call even if the user is holding a game-default key. Otherwise
@@ -1230,14 +1509,27 @@ static void __fastcall DetourOpenPanel(LONGLONG pm, const char* panelName, void*
         } __except(EXCEPTION_EXECUTE_HANDLER) {}
     }
 
-    // Forward to original function (SEH protected — disables mod on crash)
+    // Forward to original function (SEH protected). A crash on a
+    // mod-initiated call means WE supplied a bad pm (e.g. a stale seeded
+    // chain after a game update) — demote the chain and let the caller
+    // clean up, instead of bricking the mod: OpenPanelOnGameThread calls the
+    // HOOKED address, so its own __except never sees this exception.
+    // A crash on a game-initiated call is genuine trampoline corruption —
+    // disable the mod as before.
     typedef void (__fastcall* OrigFunc)(LONGLONG, const char*, void*);
     __try {
         ((OrigFunc)g_openPanelTrampoline)(pm, panelName, data);
     } __except(EXCEPTION_EXECUTE_HANDLER) {
-        g_ready = false;
-        Log("FATAL: Trampoline crashed (0x%08X) — mod disabled to prevent further crashes",
-            GetExceptionCode());
+        if (g_ourCall) {
+            g_ourCallCrashed = true;
+            Log("ERROR: OpenPanel crashed (0x%08X) on mod-supplied pm 0x%llX",
+                GetExceptionCode(), (unsigned long long)pm);
+            DemotePmChain("mod-initiated OpenPanel crashed");
+        } else {
+            g_ready = false;
+            Log("FATAL: Trampoline crashed (0x%08X) — mod disabled to prevent further crashes",
+                GetExceptionCode());
+        }
     }
 }
 
@@ -1402,6 +1694,60 @@ static uintptr_t FindFunctionStart(uintptr_t midAddr) {
         }
     }
     return 0;
+}
+
+// Re-derive the mainChar mode/sub/subtype-array offsets from the game's
+// ModeSwitcher function (the per-frame mode-string configurator). It is found
+// via the unique "ingame-global" string xref and references all mainChar mode
+// offsets as disp32 in the 0xC00-0xD00 range: the consecutive pair (X, X+1)
+// is mode byte + sub byte, the max disp within +0x20 is the subtype array.
+// Same technique as PrivateStorageAnywhere's resolver (verified on 1.13.01).
+// On failure the pre-1.13 defaults stay in place.
+static bool FindModeOffsets() {
+    uintptr_t strIG = FindString("ingame-global");
+    if (!strIG) { Log("FindModeOffsets: 'ingame-global' string not found — keeping defaults"); return false; }
+    uintptr_t leaAddr = FindLEA(strIG);
+    if (!leaAddr) { Log("FindModeOffsets: no LEA xref — keeping defaults"); return false; }
+    uintptr_t fnStart = FindFunctionStart(leaAddr);
+    if (!fnStart) { Log("FindModeOffsets: function start not found — keeping defaults"); return false; }
+
+    // Collect all unique disp32 values in the mainChar mode-byte range.
+    uint8_t* fn = (uint8_t*)fnStart;
+    const int scanWindow = 0xA00;
+    uint32_t found[64];
+    int nFound = 0;
+    for (int k = 2; k < scanWindow - 4; k++) {
+        uint8_t modrmA = fn[k - 1];
+        uint8_t modrmB = fn[k - 2];
+        bool caseA = ((modrmA & 0xC0) == 0x80) && ((modrmA & 0x07) != 0x04);
+        bool caseB = ((modrmB & 0xC0) == 0x80) && ((modrmB & 0x07) == 0x04);
+        if (!caseA && !caseB) continue;
+        uint32_t disp = *(uint32_t*)(fn + k);
+        if (disp < 0xC00 || disp >= 0xD00) continue;
+        bool dup = false;
+        for (int j = 0; j < nFound; j++) if (found[j] == disp) { dup = true; break; }
+        if (!dup && nFound < 64) found[nFound++] = disp;
+    }
+    // The consecutive pair (X, X+1) identifies mode byte + sub byte.
+    uint32_t modeByte = 0;
+    for (int i = 0; i < nFound && !modeByte; i++)
+        for (int j = 0; j < nFound; j++)
+            if (found[j] == found[i] + 1) { modeByte = found[i]; break; }
+    if (!modeByte) { Log("FindModeOffsets: no mode/sub pair in ModeSwitcher — keeping defaults"); return false; }
+    // Max disp within +0x20 of the mode byte = subtype array base.
+    uint32_t maxDisp = 0;
+    for (int i = 0; i < nFound; i++)
+        if (found[i] > modeByte + 1 && found[i] <= modeByte + 0x20 && found[i] > maxDisp)
+            maxDisp = found[i];
+    if (!maxDisp) { Log("FindModeOffsets: no subtype array disp — keeping defaults"); return false; }
+
+    g_offModeByte = modeByte;
+    g_offSubByte  = modeByte + 1;
+    g_offSubtypes = maxDisp;
+    Log("FindModeOffsets: OK base+0x%llX (mode=0x%X sub=0x%X subtypes=0x%X)",
+        (unsigned long long)(fnStart - g_gameBase),
+        g_offModeByte, g_offSubByte, g_offSubtypes);
+    return true;
 }
 
 // Returns trampoline address (for calling original) or 0 on failure.
@@ -1643,6 +1989,7 @@ static void OpenPanelOnGameThread(int panelIndex) {
         Log("Opening panel: %s (index %d)", panelName, panelIndex);
     }
 
+    g_ourCallCrashed = false;
     __try {
         g_ourCall = true;
         openPanel(pm, panelName, execEventArg);
@@ -1652,6 +1999,21 @@ static void OpenPanelOnGameThread(int panelIndex) {
         g_ourCall = false;
         Log("ERROR: Panel call crashed (0x%08X) for '%s'",
             GetExceptionCode(), panelName);
+        // A learned chain that fed this pm may be a stale false positive —
+        // drop it so the next press falls back to hook capture instead of
+        // re-reading the same bad chain in a crash loop.
+        DemotePmChain("panel call crashed");
+        g_panelManager = 0;
+        g_currentPanel = -1;
+        g_panelConfirmedOpen = false;
+        return;
+    }
+
+    // openPanel goes through the HOOKED address, so a crash inside the game's
+    // OpenPanel body is caught by the detour's SEH (which demotes the chain
+    // and sets this flag), not by the __except above. Clean up here.
+    if (g_ourCallCrashed) {
+        g_ourCallCrashed = false;
         g_panelManager = 0;
         g_currentPanel = -1;
         g_panelConfirmedOpen = false;
@@ -1837,7 +2199,6 @@ static bool g_keyWasDown[32] = {};  // track previous key state per panel
 static bool g_reloadWasDown = false;
 static DWORD g_lastActionTime = 0;  // cooldown between panel switches
 static const DWORD PANEL_COOLDOWN_MS = 400;  // 400ms between actions
-static char g_iniPath[MAX_PATH] = {};
 
 // Debounce: delay plain key when modifier bindings exist on the same key
 static int   g_pendingPanel = -1;
@@ -2216,7 +2577,7 @@ static DWORD WINAPI ModThread(LPVOID) {
         Log("BlockOverlappingInputs=0 — input-block hooks skipped");
     }
 
-    Log("=== Quick Menu Hotkeys v1.10.4 ===");
+    Log("=== Quick Menu Hotkeys v1.10.6 ===");
 
     g_gameBase = (uintptr_t)GetModuleHandleA("CrimsonDesert.exe");
     if (!g_gameBase) { Log("ERROR: CrimsonDesert.exe not found"); return 0; }
@@ -2295,9 +2656,45 @@ static DWORD WINAPI ModThread(LPVOID) {
     // Find menu state flag offsets (for toggle-close) + global/mc chain.
     FindMenuStateFlagOffsets();
 
-    // Find the PanelManager global pointer chain proactively from the binary
-    // (byte-pattern scan — does not depend on pm being alive at init time).
+    // Re-derive the mainChar mode/sub/subtype offsets (they shift between
+    // game updates; hardcoded 0xCA9 made the safety gate block every hotkey
+    // on 1.13). Fallback if the ModeSwitcher scan fails: the two flag slots
+    // FindMenuStateFlagOffsets scans independently sit at stable indices 9
+    // and 0xD of the subtype array, and the sub-mode byte sits 0xF below the
+    // array base (both verified on 1.12: 0xCC1/0xCC5 -> 0xCB8/0xCA9, and
+    // 1.13: 0xCB9/0xCBD -> 0xCB0/0xCA1) — a second, independent derivation.
+    if (!FindModeOffsets() && g_flagOffset1 != 0 && g_flagOffset2 != 0) {
+        uint32_t lo = (uint32_t)((g_flagOffset1 < g_flagOffset2)
+                                 ? g_flagOffset1 : g_flagOffset2);
+        if (lo >= 0xC10 && lo < 0xE00) {
+            g_offSubtypes = lo - 9;
+            g_offSubByte  = g_offSubtypes - 0xF;
+            g_offModeByte = g_offSubByte - 1;
+            Log("FindModeOffsets: FALLBACK from flag offsets (mode=0x%X sub=0x%X subtypes=0x%X)",
+                g_offModeByte, g_offSubByte, g_offSubtypes);
+        }
+    }
+    // Cross-check: the scanned flag offsets must live inside the subtype
+    // array, otherwise one of the two scans went stale.
+    if (g_flagOffset1 != 0 &&
+        ((uint32_t)g_flagOffset1 < g_offSubtypes ||
+         (uint32_t)g_flagOffset1 >= g_offSubtypes + 16)) {
+        Log("WARNING: flag offset 0x%X outside subtype array 0x%X..+0x10 — "
+            "mode offsets may be stale", g_flagOffset1, g_offSubtypes);
+    }
+
+    // Resolve the PanelManager global pointer chain proactively from the
+    // binary. Pre-1.13: the direct load idiom (FindPanelManagerChain). 1.13+:
+    // that idiom is gone, so derive the chain statically from FindPanelTop's
+    // call-site anchor instead (FindPmChainStatic). Either way the offsets are
+    // read fresh from the binary every boot — no persistence — so hotkeys
+    // (including game-less keys like O) work right after loading, and a future
+    // update that shifts the offsets is picked up automatically on next launch.
+    // If both static paths fail, the OpenPanel hook still learns the chain
+    // from the first live capture (ValidatePmChain), so nothing is lost.
     FindPanelManagerChain();
+    if (g_pmOffset2 == 0 && g_pmGlobalAddr != 0)
+        FindPmChainStatic();
 
     // If the chain resolved pm immediately, log it. Otherwise InputThread
     // will call ReadPanelManagerFromGlobal() until root is populated.

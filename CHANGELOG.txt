@@ -1,5 +1,17 @@
 Quick Menu Hotkeys - Changelog
 
+== v1.10.6 (2026-07-08) ==
+- New: hotkeys now work immediately after loading a save — including keys the game has no native binding for (e.g. O for Options). Previously those only worked after another menu had been opened once per session.
+- Update-proof: the internal PanelManager pointer path is now derived statically from the game binary at startup (located via the FindPanelTop call-site anchor) instead of being hardcoded. It is read fresh from the game files every launch, so a future update that shifts the offsets is picked up automatically with no mod update needed. If the anchor ever fails to match, the mod falls back to learning the path from the first live menu open.
+- New: second, independent fallback for the mode/sub-mode offsets — if the ModeSwitcher scan ever fails after an update, they are derived from the dynamically scanned menu-state flag offsets instead (relation verified on 1.12 and 1.13).
+- Hardened: chain-resolved PanelManager values are plausibility-checked and live-validated before use, so a wrong path can never hand the game a garbage pointer silently.
+
+== v1.10.5 (2026-07-08) ==
+- Updated for game version 1.13.01 (2026-07-08). Fixes all hotkeys being dead: the July update moved the mainChar mode/sub-mode block by -8 bytes, so the safety gate read the wrong byte (always 0x00) and blocked every key press as "unsafe state".
+- New: the mode/sub-mode/panel-state offsets are now re-derived at startup from the game's ModeSwitcher function (via the "ingame-global" string xref) instead of being hardcoded — survives future struct shifts. On scan failure the old defaults stay in place.
+- Hardened: the safety gate now also checks the top-level mode byte (must be 4 = ingame), so loading screens with a stale gameplay sub-mode no longer slip through.
+- New: PanelManager chain auto-relearn — 1.13 removed the static load idiom the proactive scanner matched (callers now use per-object virtual getters). The chain is now learned from the live pointer at panel captures instead: a candidate is only promoted after agreeing with the live pointer on 3 separate captures, and is demoted again on any divergence or panel-call crash. Restores the stale-pointer protection without ever trusting a coincidental match.
+
 == v1.10.4 (2026-05-16) ==
 - Updated for game version 1.07.00 (2026-05-16). Fixes the instant crash that occurred when the Pet hotkey was pressed: the post-open sub-tab switch used two hardcoded helper addresses (FindPanelTop, SetSubTab) that were valid for the 1.06.00 build but pointed at unrelated code in 1.07.00, taking down the game on the very first call.
 - New: helper addresses are now resolved dynamically by scanning OpenPanel's body. FindPanelTop is identified as the first CALL following the LEA RDX = "MainMenuView2" string load; SetSubTab is identified by its unique argument-setup signature (XOR R9D/R8D + MOV EDX,[reg+0x1AC] + CALL). Survives future address shuffles.

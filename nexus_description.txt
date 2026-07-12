@@ -185,6 +185,19 @@ Delete [b]QuickMenuHotkeys.asi[/b] and [b]QuickMenuHotkeys.ini[/b] from the game
 
 [size=3][b]Changelog[/b][/size]
 
+[b]v1.10.6[/b]
+[list]
+[*]Hotkeys now work immediately after loading a save — including keys the game has no native binding for (e.g. [b]O[/b] for Options). Previously those only worked after another menu had been opened once per session.
+[*]Update-proof: the internal pointer path this relies on is now read fresh from the game files at every launch, so a future game update that shifts it is picked up automatically with no mod update needed.
+[/list]
+
+[b]v1.10.5[/b]
+[list]
+[*]Updated for game version [b]1.13.01[/b] (2026-07-08). Fixes all hotkeys doing nothing — the July update moved an internal game-state block, so the mod's safety check misread the game state and blocked every key press.
+[*]New: the game-state offsets are now re-derived automatically at startup instead of being hardcoded — survives future updates that shift the struct again.
+[*]Hardened: the safety check now also verifies the top-level game mode, so hotkeys can no longer fire during loading screens.
+[/list]
+
 [b]v1.10.4[/b]
 [list]
 [*]Updated for game version [b]1.07.00[/b] (2026-05-16). Fixes the instant crash that occurred when pressing the Pet hotkey — two hardcoded helper addresses used by the post-open sub-tab switch were valid for 1.06.00 but pointed at unrelated code in 1.07.00, taking down the game on the very first call.
