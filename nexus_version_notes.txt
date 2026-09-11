@@ -1,0 +1,66 @@
+Short per-version notes for the Nexus "Version notes" field (max 255 characters each).
+Copy the line(s) below the version number when uploading that file version.
+=======================================================================
+
+v1.11.0
+Updated for game 2.02.00. Fixes hotkeys doing nothing and panels not closing after the update, and J opening the Inventory instead of the new Quest journal. Panels now close through the game's own menu-close call.
+
+v1.10.6
+Hotkeys now work right after loading a save — including keys the game doesn't know natively (e.g. O for Options). The mod reads the internal pointer path from the game files each launch, so updates that shift it are handled automatically.
+
+v1.10.5
+Updated for game 1.13.01. Fixes all hotkeys doing nothing after the July update (every press was blocked as "unsafe state"). Game-state offsets are now detected automatically, so future updates are less likely to break the hotkeys.
+
+v1.10.4
+Updated for game 1.07.00. Fixes the instant crash when pressing the Pet hotkey.
+
+v1.10.3
+Updated for game 1.06.00. All hotkeys work again. New: bound controller buttons are hidden from the game while the modifier is held, so a combo no longer also triggers the default action (e.g. consuming an item).
+
+v1.10.2
+Updated for game 1.0.4.1. All panel hotkeys, toggle-close, and instant availability after loading work as before.
+
+v1.10.1
+Adds D-Pad support for PS controllers in native HID mode (DPadUp/Down/Left/Right as PSButton values).
+
+v1.10
+Native PS5/PS4 controller support (DualSense, DualShock 4). No more double press needed after the game closed a panel itself (e.g. after using an item).
+
+v1.9.3
+Toggle no longer desyncs when the game closes a panel itself — no more double presses after using an item or teleporting from the map.
+
+v1.9.2
+Switching from a modifier combo to the plain key on the same base key (e.g. Shift+J to J) no longer closes the menu.
+
+v1.9.1
+More reliable game window detection — prevents conflicts with Discord/Steam overlays.
+
+v1.9
+Stability update: safer panel opening/closing on the game thread, fresh PanelManager pointer before every open (no more stale-pointer crashes after loading screens), and hardened hook installation.
+
+v1.8.1
+Plain hotkeys are now blocked while Shift/Ctrl/Alt is held — prevents conflicts with other mods using modifier combos on the same key.
+
+v1.8
+New safety check: hotkeys are blocked during cutscenes, QTEs, and minigames. Menu state offsets are now scanned dynamically — survives game patches.
+
+v1.7.1
+OverrideGameKeys no longer blocks the game's own UI calls (settlement interface, NPC menus) — only physical key presses are intercepted.
+
+v1.7
+Keyboard modifiers (Shift+J, Ctrl+J...) to bind multiple panels to one key, INI hot-reload (F11), and crash protection that disables the mod instead of crashing the game after an update.
+
+v1.6
+Controller support via XInput — assign controller buttons (with optional modifier like LB+D-Pad) to any panel. Remapped menu keys are freed from the game's hardcoded binds.
+
+v1.5
+Holding a key no longer rapidly opens/closes the panel; 400ms cooldown between panel switches; toggle-close uses the game's internal menu state.
+
+v1.4
+Pressing the same hotkey again now closes the panel.
+
+v1.3
+Adds World Map hotkey (M) and extra panels (Challenge, Faction Quests, Guides, Notifications). Update-proof pattern scanning — hotkeys work immediately without opening a menu first.
+
+v1.0
+Initial release: I=Inventory, J=Journal, K=Skills, L=Knowledge, O=Options. Press another hotkey while a menu is open to switch instantly. All keys configurable via INI.

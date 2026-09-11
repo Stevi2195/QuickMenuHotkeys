@@ -5,15 +5,14 @@
 #include <string>
 
 // ============================================================
-//  Quick Menu Hotkeys v1.10.6 — Cross-Reference Pattern Scanner
+//  Quick Menu Hotkeys
 //
-//  Finds the OpenPanel function by cross-referencing multiple
-//  known panel name strings. The common CALL target across
-//  multiple panel string references = OpenPanel function.
+//  Opens the game's menu panels directly from a hotkey or controller
+//  button. OpenPanel, FindPanelTop and the game's own menu-close call are
+//  located by cross-referencing panel-name strings at startup, so no
+//  fixed addresses are carried between game updates.
 //
-//  PanelManager is resolved two ways:
-//   1. Global pointer chain (immediate, no user action needed)
-//   2. Hook fallback (captures RCX when game calls OpenPanel)
+//  See CHANGELOG.txt for version history.
 // ============================================================
 
 // --- Globals ---
@@ -28,6 +27,9 @@ static volatile LONG g_hookCounter = 0;
 static uintptr_t g_openPanelAddr  = 0;
 static uintptr_t g_findPanelAddr  = 0;
 static uintptr_t g_findPanelTopAddr = 0;  // top-level panel lookup (pm[0x30ec8] array iterator)
+static uintptr_t g_findPanelTopTramp = 0; // trampoline for the pm-seeding hook (see DetourFindPanelTop)
+static uint32_t  g_pmArrayOff = 0;        // pm+N: panel entry array   (read out of FindPanelTop's prolog)
+static uint32_t  g_pmCountOff = 0;        // pm+N: panel entry count
 static uintptr_t g_setSubTabAddr    = 0;  // sub-tab switcher
 static uintptr_t g_r8DataAddr     = 0;
 
@@ -65,7 +67,7 @@ static volatile int g_currentPanel = -1;
 static volatile bool g_panelConfirmedOpen = false;  // true once flag1 seen non-zero after open
 
 #define WM_OPEN_PANEL  (WM_USER + 501)
-#define WM_CLEAR_FLAGS (WM_USER + 502)
+#define WM_CLOSE_PANEL (WM_USER + 502)
 
 // ============================================================
 //  Config
@@ -185,6 +187,14 @@ static bool g_psModifierEnabled = false;
 // buttons are masked out of the data the GAME sees, so the same press doesn't
 // trigger both the panel hotkey and the default in-game action.
 static bool g_blockOverlappingInputs = true;
+
+// The game's own menu-close call, recovered from its own toggle code.
+// See ResolveMenuClose() for the signature this is derived from.
+static uintptr_t g_menuCloseFn    = 0;   // f(menuObj, 0, 0)
+static uintptr_t g_menuRootGlobal = 0;   // menuObj = *( *(global) + g_menuObjOff )
+static uint32_t  g_menuObjOff     = 0;
+static uint32_t  g_panelStateOff  = 0;   // panelObj+N: view state byte
+static uintptr_t g_questMenuFlag  = 0;   // game byte: 0 = old quest journal (QuestMenuPanel), else QuestMenuPanel2
 static uintptr_t g_xinputTrampoline = 0;
 static uintptr_t g_griTrampoline    = 0;
 
@@ -484,11 +494,12 @@ static void ParseSonyHidReport(LPARAM lParam) {
     g_hidConnected = true;
 }
 
-// mainChar mode/sub-mode/subtype-array offsets. Defaults match the pre-July-2026
-// struct layout (game <= 1.12); FindModeOffsets() re-derives them at init from
-// the ModeSwitcher function, because the block shifts between game updates
-// (July 2026 / 1.13 moved it by -8: mode 0xCA8->0xCA0, sub 0xCA9->0xCA1,
-// subtype array 0xCB8->0xCB0).
+// mainChar mode/sub-mode/subtype-array offsets, re-derived at init by
+// FindModeOffsets() from the ModeSwitcher function. They are only ever read
+// when the root global (g_pmGlobalAddr) resolved as well. On CD 2.01.00 the
+// mode state no longer lives in mainChar and the flag-array anchor is gone, so
+// g_pmGlobalAddr stays 0 and IsGameplayState() cannot evaluate the state — it
+// then reports "safe" and the gate is effectively off.
 static uint32_t g_offModeByte = 0xCA8;  // mainChar+N: u8 current mode (4 = ingame)
 static uint32_t g_offSubByte  = 0xCA9;  // mainChar+N: u8 current sub-mode
 static uint32_t g_offSubtypes = 0xCB8;  // mainChar+N: 16-slot panel-state flag array
@@ -527,21 +538,192 @@ static bool IsGameplayState() {
 static int g_flagOffset1 = 0;  // first byte-write-zero offset (near "LogoutView")
 static int g_flagOffset2 = 0;  // second byte-write-zero offset
 
-static void ClearMenuStateFlags() {
-    if (g_pmGlobalAddr != 0 && g_flagOffset1 != 0) {
-        __try {
-            uintptr_t root = *(uintptr_t*)g_pmGlobalAddr;
-            if (root) {
-                uintptr_t uiCtrl = *(uintptr_t*)(root + 0x48);
-                if (uiCtrl) {
-                    *(uint8_t*)(uiCtrl + g_flagOffset1) = 0;
-                    *(uint8_t*)(uiCtrl + g_flagOffset2) = 0;
-                    Log("Menu state flags cleared (0x%X/0x%X)", g_flagOffset1, g_flagOffset2);
+// ============================================================
+//  Panel close
+// ============================================================
+// Closing used to mean "clear two menu-state bytes" in mainChar. That anchor
+// has been gone since CD 1.13, which turned the close into a silent no-op.
+// Since 2.01.00 the mod calls the game's own menu-close function instead
+// (ResolveMenuClose / CloseMenuNow); the open/closed test reads the per-panel
+// view state byte. Menu-state bytes, a synthetic ESC and the "PrevMenu" event
+// were all tried and dropped again.
+
+// ------------------------------------------------------------------
+//  The game's own "is this panel open?" test and menu-close call
+// ------------------------------------------------------------------
+// Recovered from the game's own panel toggle code, which reads:
+//
+//     call    [vtable+0x110]            ; -> PanelManager
+//     lea     rdx, [panel name]
+//     call    FindPanelTop              ; -> panel object
+//     test    rax, rax        / je      skip
+//     movzx   eax, byte [rax + STATE]   ; 0F B6 80 <disp32>
+//     and     al, 0x60                  ; 24 60
+//     cmp     al, 0x40                  ; 3C 40
+//     jne     skip                      ; not open -> nothing to close
+//     mov     rcx, [rip + GLOBAL]
+//     mov     rcx, [rcx + OBJOFF]       ; 48 8B 89 <disp32>
+//     xor     edx, edx / xor r8d, r8d
+//     call    MENUCLOSE
+//
+// Everything the mod needs is in that one shape, and none of it is a
+// per-caller context object: the close takes a menu object reachable from a
+// plain global. Anchoring the scan on FindPanelTop (which the mod resolves
+// precisely) plus the exact AND 0x60 / CMP 0x40 test makes the match
+// self-validating. On build 25116796 exactly two sites match and both agree.
+//
+// This replaces the menu-state flag array (unresolvable since CD 1.13, which
+// made toggle-close a no-op).
+static bool ResolveMenuClose() {
+    BYTE* base = (BYTE*)g_gameBase;
+
+    // Pass 1: the state offset on its own. The open-test idiom appears all over
+    // the UI code, so even if the close-call shape ever changes, IsPanelOpen()
+    // keeps working. Majority vote over every occurrence.
+    {
+        uint32_t cand[8] = {}; int votes[8] = {}; int nc = 0;
+        for (DWORD i = 0; (size_t)i + 11 < g_imageSize; i++) {
+            if (base[i] != 0x0F || base[i+1] != 0xB6 || base[i+2] != 0x80) continue;
+            if (base[i+7] != 0x24 || base[i+8] != 0x60) continue;
+            if (base[i+9] != 0x3C || base[i+10] != 0x40) continue;
+            uint32_t off = *(uint32_t*)(base + i + 3);
+            if (off < 0x10 || off > 0x2000) continue;
+            int k = 0;
+            for (; k < nc; k++) if (cand[k] == off) { votes[k]++; break; }
+            if (k == nc && nc < 8) { cand[nc] = off; votes[nc] = 1; nc++; }
+        }
+        int best = 0;
+        for (int k = 0; k < nc; k++)
+            if (votes[k] > best) { best = votes[k]; g_panelStateOff = cand[k]; }
+        if (g_panelStateOff)
+            Log("MenuClose: panel state byte at +0x%X (%d sites)", g_panelStateOff, best);
+        else
+            Log("MenuClose: panel open-test idiom not found — open detection disabled");
+    }
+
+    if (!g_findPanelTopAddr) {
+        Log("MenuClose: FindPanelTop unresolved — close call cannot be derived");
+        return false;
+    }
+
+    // Pass 2: the full shape, anchored on FindPanelTop.
+    uintptr_t fn = 0, glob = 0;
+    uint32_t  objOff = 0;
+    int matches = 0, disagreements = 0;
+    for (DWORD i = 0; (size_t)i + 0x80 < g_imageSize; i++) {
+        if (base[i] != 0x0F || base[i+1] != 0xB6 || base[i+2] != 0x80) continue;
+        if (base[i+7] != 0x24 || base[i+8] != 0x60) continue;
+        if (base[i+9] != 0x3C || base[i+10] != 0x40) continue;
+
+        bool anchored = false;
+        for (int back = 5; back <= 0x30 && (DWORD)back <= i; back++) {
+            BYTE* q = base + i - back;
+            if (q[0] != 0xE8) continue;
+            if ((uintptr_t)(q + 5) + *(int32_t*)(q + 1) == g_findPanelTopAddr) {
+                anchored = true; break;
+            }
+        }
+        if (!anchored) continue;
+
+        // mov rcx,[rcx+disp32]  = 48 8B 89 disp32, then a CALL shortly after
+        for (int f = 11; f < 0x60; f++) {
+            BYTE* q = base + i + f;
+            if (q[0] != 0x48 || q[1] != 0x8B || q[2] != 0x89) continue;
+            uint32_t oo = *(uint32_t*)(q + 3);
+            if (oo < 0x10 || oo > 0x2000) break;
+            uintptr_t g = 0;
+            for (int back = 7; back <= 0x20; back++) {
+                BYTE* r = q - back;
+                if (r[0] == 0x48 && r[1] == 0x8B && r[2] == 0x0D) {
+                    uintptr_t cand = (uintptr_t)(r + 7) + *(int32_t*)(r + 3);
+                    if (cand > g_gameBase && cand < g_gameBase + g_imageSize) g = cand;
                 }
             }
-        } __except(EXCEPTION_EXECUTE_HANDLER) {
-            Log("WARNING: Failed to clear menu flags");
+            uintptr_t tgt = 0;
+            for (int f2 = 7; f2 < 0x20; f2++) {
+                BYTE* r = q + f2;
+                if (r[0] != 0xE8) continue;
+                uintptr_t t = (uintptr_t)(r + 5) + *(int32_t*)(r + 1);
+                if (t > g_gameBase && t < g_gameBase + g_imageSize) tgt = t;
+                break;
+            }
+            if (!g || !tgt) break;
+            matches++;
+            if (!fn) { fn = tgt; glob = g; objOff = oo; }
+            else if (fn != tgt || glob != g || objOff != oo) disagreements++;
+            break;
         }
+    }
+
+    if (!fn || disagreements) {
+        Log("MenuClose: NOT resolved (%d match(es), %d disagreement(s))",
+            matches, disagreements);
+        return false;
+    }
+    g_menuCloseFn    = fn;
+    g_menuRootGlobal = glob;
+    g_menuObjOff     = objOff;
+    Log("MenuClose: OK fn=base+0x%llX  menuObj=*(*(base+0x%llX)+0x%X)  (%d agreeing sites)",
+        (unsigned long long)(fn - g_gameBase),
+        (unsigned long long)(glob - g_gameBase), objOff, matches);
+    return true;
+}
+
+// View state of one panel object: 0 = not found, else the state byte.
+static bool ReadPanelState(const char* panelName, BYTE* out) {
+    if (!panelName || !panelName[0]) return false;
+    if (!g_findPanelTopAddr || !g_panelStateOff) return false;
+    LONGLONG pm = g_panelManager;
+    if (pm == 0) return false;
+    typedef LONGLONG (__fastcall* FindPanelTopFn2)(LONGLONG, const char*);
+    __try {
+        LONGLONG panel = ((FindPanelTopFn2)g_findPanelTopAddr)(pm, panelName);
+        if (!panel) return false;
+        *out = *(BYTE*)(panel + g_panelStateOff);
+        return true;
+    } __except(EXCEPTION_EXECUTE_HANDLER) {}
+    return false;
+}
+
+// Ask the game whether a panel is currently on screen. Far better than the old
+// global flag array: it is per panel, and it stays correct when the player
+// closes a panel with ESC behind the mod's back.
+//
+// The menu panels (Inventory, Quest, Skill, Knowledge, ...) are tabs inside
+// MainMenuView2. Most of them carry the "open" state themselves, but the
+// quest panel's own object never does (it reads 0x90 while visibly open on
+// 2.02.00). So the container counts too: if the panel's own byte does not say
+// "open" but MainMenuView2 is open, the panel is treated as open.
+static bool IsPanelOpenByName(const char* panelName) {
+    BYTE st = 0;
+    if (!ReadPanelState(panelName, &st)) return false;
+    if ((st & 0x60) == 0x40) return true;
+    BYTE mm = 0;
+    bool mmOpen = ReadPanelState("MainMenuView2", &mm) && (mm & 0x60) == 0x40;
+    Log("Panel '%s' state byte +0x%X = 0x%02X, MainMenuView2 = 0x%02X -> %s",
+        panelName, g_panelStateOff, st, mm, mmOpen ? "open (via container)" : "not open");
+    return mmOpen;
+}
+
+static bool PanelOpenCheckAvailable() {
+    return g_findPanelTopAddr != 0 && g_panelStateOff != 0 && g_panelManager != 0;
+}
+
+static void CloseMenuNow() {
+    if (!g_menuCloseFn || !g_menuRootGlobal) {
+        Log("Close: menu-close unresolved");
+        return;
+    }
+    typedef void (__fastcall* MenuCloseFn)(LONGLONG, LONGLONG, LONGLONG);
+    __try {
+        LONGLONG root = *(LONGLONG*)g_menuRootGlobal;
+        if (!root) { Log("Close: menu root global is null"); return; }
+        LONGLONG obj = *(LONGLONG*)(root + g_menuObjOff);
+        if (!obj) { Log("Close: menu object is null"); return; }
+        ((MenuCloseFn)g_menuCloseFn)(obj, 0, 0);
+        Log("Close: menu closed via the game's own call");
+    } __except(EXCEPTION_EXECUTE_HANDLER) {
+        Log("Close: menu-close call raised an exception");
     }
 }
 
@@ -551,8 +733,15 @@ static void ClearMenuStateFlags() {
 // Post Apr-23 2026 update: single-byte check on flag1 (slot 0x0D) became unreliable
 // (transient slot). The scanned flag offsets (g_flagOffset1/g_flagOffset2) both
 // fall inside this 16-byte array — scanning the whole array covers every panel.
+// True only when the flag array is actually reachable. IsPanelFlagSet() returns
+// false both for "no panel open" and for "cannot tell", so callers that would
+// act on a negative MUST check this first.
+static bool PanelFlagsAvailable() {
+    return g_pmGlobalAddr != 0 && g_flagOffset1 != 0;
+}
+
 static bool IsPanelFlagSet() {
-    if (g_pmGlobalAddr == 0 || g_flagOffset1 == 0) return false;
+    if (!PanelFlagsAvailable()) return false;
     __try {
         uintptr_t root = *(uintptr_t*)g_pmGlobalAddr;
         if (!root) return false;
@@ -671,11 +860,148 @@ static int FindAllCALLsAfter(uintptr_t from, int maxRange,
     return count;
 }
 
+// ============================================================
+//  Precise OpenPanel / FindPanelTop resolution
+// ============================================================
+// The scoring resolver further down collects EVERY call in a 200-byte window
+// after a panel-name LEA. On the 2026-09 build that lets the generic
+// name->panel lookup outscore OpenPanel itself — the lookup is reachable from
+// far more sites — so the mod ended up hooking the lookup and no hotkey did
+// anything. Both functions have a much tighter signature than "a call nearby":
+//
+//   FindPanelTop(pm, name)    is the callee of the FIRST call within 40 bytes
+//                             of a LEA RDX,[panel name].
+//   OpenPanel(pm, name, ...)  CONTAINS "LEA RDX,[MainMenuView2]; CALL
+//                             FindPanelTop" inside its first 128 bytes, and is
+//                             itself called with panel-name strings in RDX.
+//
+// Verified on build 25116796: FindPanelTop wins 21 of 21 MainMenuView2 sites,
+// and OpenPanel is the only MainMenuView2-carrying function that is invoked
+// with three different panel names. Falls back to the old scoring resolver.
+
+// Defined further down with the other image-walking helpers.
+static uintptr_t FindFunctionStart(uintptr_t midAddr);
+
+// First CALL rel32 within `span` bytes after `from`; 0 if the next call does
+// not resolve into the image.
+static uintptr_t FirstCallAfter(uintptr_t from, int span) {
+    BYTE* p = (BYTE*)from;
+    for (int j = 7; j < span; j++) {
+        if (p[j] != 0xE8) continue;
+        int32_t rel = *(int32_t*)(p + j + 1);
+        uintptr_t t = (uintptr_t)(p + j + 5) + rel;
+        if (t > g_gameBase && t < g_gameBase + g_imageSize) return t;
+        return 0;
+    }
+    return 0;
+}
+
+// LEA RDX, [rip+disp32] — the callee's 2nd argument, i.e. the panel name.
+static inline bool IsLeaRdx(uintptr_t lea) {
+    BYTE* p = (BYTE*)lea;
+    return p[0] == 0x48 && p[1] == 0x8D && p[2] == 0x15;
+}
+
+static bool FindOpenPanelPrecise() {
+    uintptr_t mainMenuStr = FindString("MainMenuView2");
+    if (!mainMenuStr) {
+        Log("Precise resolver: 'MainMenuView2' string not found");
+        return false;
+    }
+
+    // --- 1) FindPanelTop: most-voted callee of LEA RDX,[MainMenuView2] ---
+    const int MAXC = 16;
+    uintptr_t cand[MAXC] = {};
+    int       votes[MAXC] = {};
+    int       nc = 0;
+    uintptr_t lea = 0;
+    for (int guard = 0; guard < 64; guard++) {
+        lea = FindLEA(mainMenuStr, lea ? lea + 1 : 0);
+        if (!lea) break;
+        if (!IsLeaRdx(lea)) continue;
+        uintptr_t t = FirstCallAfter(lea, 40);
+        if (!t) continue;
+        int k = 0;
+        for (; k < nc; k++) if (cand[k] == t) { votes[k]++; break; }
+        if (k == nc && nc < MAXC) { cand[nc] = t; votes[nc] = 1; nc++; }
+    }
+    uintptr_t panelTop = 0;
+    int topVotes = 0;
+    for (int k = 0; k < nc; k++)
+        if (votes[k] > topVotes) { topVotes = votes[k]; panelTop = cand[k]; }
+    if (!panelTop || topVotes < 2) {
+        Log("Precise resolver: no clear FindPanelTop (best %d votes)", topVotes);
+        return false;
+    }
+    Log("Precise resolver: FindPanelTop = base+0x%llX (%d/%d MainMenuView2 sites)",
+        (unsigned long long)(panelTop - g_gameBase), topVotes, nc ? nc : 1);
+
+    // --- 2) OpenPanel: MainMenuView2-carrying function called with panel names ---
+    uintptr_t owners[MAXC] = {};
+    int       nOwners = 0;
+    lea = 0;
+    for (int guard = 0; guard < 64; guard++) {
+        lea = FindLEA(mainMenuStr, lea ? lea + 1 : 0);
+        if (!lea) break;
+        if (!IsLeaRdx(lea)) continue;
+        if (FirstCallAfter(lea, 40) != panelTop) continue;
+        uintptr_t fn = FindFunctionStart(lea);
+        if (!fn || lea - fn > 128) continue;
+        bool dup = false;
+        for (int k = 0; k < nOwners; k++) if (owners[k] == fn) { dup = true; break; }
+        if (!dup && nOwners < MAXC) owners[nOwners++] = fn;
+    }
+    if (!nOwners) {
+        Log("Precise resolver: no function carries MainMenuView2 near its start");
+        return false;
+    }
+
+    static const char* const probes[] = {
+        "InventoryEquipmentPanel", "SkillTreePanel",
+        "KnowledgePanel2", "QuestMenuPanel",
+    };
+    const int nProbes = (int)(sizeof(probes) / sizeof(probes[0]));
+    int hits[MAXC] = {};
+    for (int pi = 0; pi < nProbes; pi++) {
+        uintptr_t str = FindString(probes[pi]);
+        if (!str) continue;
+        bool seen[MAXC] = {};
+        uintptr_t l = 0;
+        for (int guard = 0; guard < 64; guard++) {
+            l = FindLEA(str, l ? l + 1 : 0);
+            if (!l) break;
+            if (!IsLeaRdx(l)) continue;
+            uintptr_t t = FirstCallAfter(l, 40);
+            if (!t) continue;
+            for (int k = 0; k < nOwners; k++)
+                if (owners[k] == t && !seen[k]) { seen[k] = true; hits[k]++; }
+        }
+    }
+    int bestK = -1, bestHits = 0;
+    for (int k = 0; k < nOwners; k++)
+        if (hits[k] > bestHits) { bestHits = hits[k]; bestK = k; }
+    if (bestK < 0 || bestHits < 2) {
+        Log("Precise resolver: %d MainMenuView2 owner(s), none called with 2+ panel names",
+            nOwners);
+        return false;
+    }
+
+    g_openPanelAddr    = owners[bestK];
+    g_findPanelTopAddr = panelTop;
+    Log("OpenPanel found at base+0x%llX (precise: %d/%d panel names, %d owner candidates)",
+        (unsigned long long)(g_openPanelAddr - g_gameBase),
+        bestHits, nProbes, nOwners);
+    return true;
+}
+
 // Cross-reference strategy:
 // 1. Find multiple known panel strings
-// 2. For each string, find LEA references → collect ALL CALL targets nearby
+// 2. For each string, find LEA references -> collect ALL CALL targets nearby
 // 3. Best match = OpenPanel, second best = FindPanel
 static bool FindOpenPanelFunction() {
+    if (FindOpenPanelPrecise()) return true;
+    Log("Precise resolver failed — falling back to the legacy CALL-window scoring");
+
     const char* probeStrings[] = {
         "InventoryEquipmentPanel",
         "QuestMenuPanel",
@@ -1036,7 +1362,8 @@ static bool FindMenuStateFlagOffsets() {
         }
     }
 
-    Log("WARNING: Menu state flag offsets not found — toggle-close disabled");
+    Log("Menu state flag array not found (expected since CD 1.13) — open/closed "
+        "state comes from the per-panel view state instead");
     return false;
 }
 
@@ -1468,6 +1795,79 @@ static void ValidatePmChain(LONGLONG pm) {
     LearnPmChainCandidate(pm);
 }
 
+// ============================================================
+//  New quest journal switch
+// ============================================================
+// The game keeps two quest journals. Every place that opens the journal
+// builds the panel name at runtime:
+//     name = "QuestMenuPanel";  if (FLAG_BYTE != 0) name = "QuestMenuPanel2";
+// (Ghidra 2.01.00: DAT_146b70448, 11 sites.) With the flag set the tab in
+// MainMenuView2 is QuestMenuPanel2, so opening "QuestMenuPanel" matches no
+// tab and the menu lands on its last tab (usually the Inventory) — which is
+// what J did since the new journal shipped. Resolve the flag byte the same
+// way: at each LEA of "QuestMenuPanel" the compare  CMP byte [rip+FLAG],0
+// (80 3D disp32 00) follows within a few dozen bytes; majority vote.
+static void ResolveQuestMenuFlag() {
+    // "QuestMenuPanel" is also the tail of "DailyQuestMenuPanel" and
+    // "FactionQuestMenuPanel", so walk every occurrence that starts a string
+    // (preceded by a NUL) instead of taking the first substring match.
+    static const char kName[] = "QuestMenuPanel";
+    const int kLen = (int)sizeof(kName) - 1;
+    BYTE* base = (BYTE*)g_gameBase;
+    uintptr_t cand[8] = {}; int votes[8] = {}; int nc = 0;
+    int strings = 0, leas = 0;
+    for (DWORD i = 1; i + kLen + 1 < g_imageSize; i++) {
+        if (base[i] != 'Q' || base[i - 1] != 0) continue;
+        if (memcmp(base + i, kName, kLen + 1) != 0) continue;
+        strings++;
+        uintptr_t str = g_gameBase + i;
+        uintptr_t lea = 0;
+        for (int guard = 0; guard < 32; guard++) {
+            lea = FindLEA(str, lea ? lea + 1 : 0);
+            if (!lea) break;
+            leas++;
+            for (int k = 7; k < 0x40; k++) {
+                BYTE* q = (BYTE*)(lea + k);
+                if (q[0] != 0x80 || q[1] != 0x3D || q[6] != 0x00) continue;
+                uintptr_t g = (uintptr_t)(q + 7) + *(int32_t*)(q + 2);
+                if (g <= g_gameBase || g >= g_gameBase + g_imageSize) continue;
+                int c = 0;
+                for (; c < nc; c++) if (cand[c] == g) { votes[c]++; break; }
+                if (c == nc && nc < 8) { cand[nc] = g; votes[nc] = 1; nc++; }
+                break;
+            }
+        }
+    }
+    Log("QuestMenuFlag: %d string(s), %d LEA site(s)", strings, leas);
+    int best = 0, total = 0; uintptr_t bestG = 0;
+    for (int c = 0; c < nc; c++) { total += votes[c]; if (votes[c] > best) { best = votes[c]; bestG = cand[c]; } }
+    if (bestG && best >= 2 && best * 2 > total) {
+        g_questMenuFlag = bestG;
+        BYTE v = 0xFF;
+        __try { v = *(BYTE*)bestG; } __except(EXCEPTION_EXECUTE_HANDLER) {}
+        Log("QuestMenuFlag: OK base+0x%llX (%d/%d sites agree), value now %u -> %s",
+            (unsigned long long)(bestG - g_gameBase), best, total, (unsigned)v,
+            v ? "QuestMenuPanel2" : "QuestMenuPanel");
+    } else {
+        Log("QuestMenuFlag: not resolved (%d candidates, best %d/%d) — J uses the configured name",
+            nc, best, total);
+    }
+}
+
+// The panel name to use for a binding right now. Only the built-in
+// QuestBook default follows the game's flag; a PanelName= override in the
+// INI is always used as written.
+static const char* PanelNameFor(int i) {
+    const char* name = g_panels[i].panelName;
+    if (g_questMenuFlag && g_panels[i].customPanelName[0] == 0 &&
+        strcmp(name, "QuestMenuPanel") == 0) {
+        BYTE v = 0;
+        __try { v = *(BYTE*)g_questMenuFlag; } __except(EXCEPTION_EXECUTE_HANDLER) {}
+        if (v) return "QuestMenuPanel2";
+    }
+    return name;
+}
+
 // C detour for OpenPanel — blocks game-triggered opens for remapped panels
 static void __fastcall DetourOpenPanel(LONGLONG pm, const char* panelName, void* data) {
     // First-capture tracking — decides whether to let this call through
@@ -1705,11 +2105,11 @@ static uintptr_t FindFunctionStart(uintptr_t midAddr) {
 // On failure the pre-1.13 defaults stay in place.
 static bool FindModeOffsets() {
     uintptr_t strIG = FindString("ingame-global");
-    if (!strIG) { Log("FindModeOffsets: 'ingame-global' string not found — keeping defaults"); return false; }
+    if (!strIG) { Log("FindModeOffsets: 'ingame-global' string not found — safety gate cannot evaluate the game state"); return false; }
     uintptr_t leaAddr = FindLEA(strIG);
-    if (!leaAddr) { Log("FindModeOffsets: no LEA xref — keeping defaults"); return false; }
+    if (!leaAddr) { Log("FindModeOffsets: no LEA xref — safety gate cannot evaluate the game state"); return false; }
     uintptr_t fnStart = FindFunctionStart(leaAddr);
-    if (!fnStart) { Log("FindModeOffsets: function start not found — keeping defaults"); return false; }
+    if (!fnStart) { Log("FindModeOffsets: function start not found — safety gate cannot evaluate the game state"); return false; }
 
     // Collect all unique disp32 values in the mainChar mode-byte range.
     uint8_t* fn = (uint8_t*)fnStart;
@@ -1733,13 +2133,13 @@ static bool FindModeOffsets() {
     for (int i = 0; i < nFound && !modeByte; i++)
         for (int j = 0; j < nFound; j++)
             if (found[j] == found[i] + 1) { modeByte = found[i]; break; }
-    if (!modeByte) { Log("FindModeOffsets: no mode/sub pair in ModeSwitcher — keeping defaults"); return false; }
+    if (!modeByte) { Log("FindModeOffsets: no mode/sub pair in ModeSwitcher — safety gate cannot evaluate the game state"); return false; }
     // Max disp within +0x20 of the mode byte = subtype array base.
     uint32_t maxDisp = 0;
     for (int i = 0; i < nFound; i++)
         if (found[i] > modeByte + 1 && found[i] <= modeByte + 0x20 && found[i] > maxDisp)
             maxDisp = found[i];
-    if (!maxDisp) { Log("FindModeOffsets: no subtype array disp — keeping defaults"); return false; }
+    if (!maxDisp) { Log("FindModeOffsets: no subtype array disp — safety gate cannot evaluate the game state"); return false; }
 
     g_offModeByte = modeByte;
     g_offSubByte  = modeByte + 1;
@@ -1916,6 +2316,99 @@ static uintptr_t InstallHookGeneric(uintptr_t targetAddr, void* detourFn,
     return (uintptr_t)trampMem;
 }
 
+// ============================================================
+//  PanelManager seeding via FindPanelTop
+// ============================================================
+// Until some panel is opened, g_panelManager stays 0 and every hotkey is a
+// no-op — the user has to open one vanilla panel first to prime the mod.
+// Before 1.13 pm came from a static load idiom; that idiom is gone, and on
+// 2.01.00 callers fetch pm through a per-object virtual getter (vtable+0x110)
+// hanging off the caller's own `this`, which no byte pattern can follow.
+//
+// FindPanelTop(pm, name) takes pm as its FIRST argument and is called from 226
+// sites across the binary — including ordinary UI work that runs long before
+// the user touches a panel. Hooking it purely to read RCX seeds g_panelManager
+// within the first frames and changes no behaviour.
+//
+// The candidate is validated against the very array FindPanelTop itself walks,
+// so a wrong or stale RCX is never adopted. Both offsets are read out of
+// FindPanelTop's own prolog rather than hardcoded (2.01.00: entries +0x30EB8,
+// count +0x30EC0; 1.13 had them 0x10 higher).
+
+// FindPanelTop opens with two  MOV reg,[RCX+disp32]  loads: the entry array and
+// the entry count. Pick the first two such loads with a struct-sized
+// displacement, in address order.
+static bool DeriveFindPanelTopOffsets() {
+    if (!g_findPanelTopAddr) return false;
+    const BYTE* fn = (const BYTE*)g_findPanelTopAddr;
+    uint32_t found[2] = {0, 0};
+    int n = 0;
+    for (int i = 0; i < 0x40 && n < 2; i++) {
+        // 8B /r with mod=10, rm=001 (RCX base, disp32); optional REX.W/R prefix.
+        int k = i;
+        if (fn[k] == 0x48 || fn[k] == 0x4C || fn[k] == 0x49 || fn[k] == 0x4D) k++;
+        if (fn[k] != 0x8B) continue;
+        if ((fn[k + 1] & 0xC7) != 0x81) continue;
+        uint32_t disp = *(const uint32_t*)(fn + k + 2);
+        if (disp < 0x1000 || disp > 0x100000) continue;
+        found[n++] = disp;
+        i = k + 5;
+    }
+    if (n < 2) {
+        Log("PmSeed: FindPanelTop prolog offsets not derivable (%d found) — seeding disabled", n);
+        return false;
+    }
+    g_pmArrayOff = found[0];
+    g_pmCountOff = found[1];
+    Log("PmSeed: pm entry array at +0x%X, count at +0x%X (from FindPanelTop prolog)",
+        g_pmArrayOff, g_pmCountOff);
+    return true;
+}
+
+static void TrySeedPanelManager(LONGLONG pm) {
+    if (pm == 0 || g_pmArrayOff == 0) return;
+    __try {
+        uintptr_t entries = *(uintptr_t*)(pm + g_pmArrayOff);
+        uint32_t  count   = *(uint32_t*)(pm + g_pmCountOff);
+        // A real PanelManager has a heap-allocated entry array and a sane count.
+        if (entries <= 0x10000 || count == 0 || count > 0x1000) return;
+        if (InterlockedCompareExchange64((volatile LONG64*)&g_panelManager,
+                                         (LONG64)pm, 0) == 0) {
+            Log("[PmSeed] PanelManager 0x%llX captured from FindPanelTop "
+                "(entries=0x%llX count=%u) — hotkeys live without a vanilla panel first",
+                (unsigned long long)pm, (unsigned long long)entries, count);
+        }
+    } __except(EXCEPTION_EXECUTE_HANDLER) {}
+}
+
+// Pass all four register arguments through untouched — the exact arity of
+// FindPanelTop is not certain, and clobbering R8/R9 would corrupt the call.
+typedef LONGLONG (__fastcall *FindPanelTopFn)(LONGLONG, LONGLONG, LONGLONG, LONGLONG);
+
+static LONGLONG __fastcall DetourFindPanelTop(LONGLONG pm, LONGLONG a2,
+                                              LONGLONG a3, LONGLONG a4) {
+    // One predictable-branch compare once pm is known; this is a hot path.
+    if (InterlockedCompareExchange64((volatile LONG64*)&g_panelManager, 0, 0) == 0)
+        TrySeedPanelManager(pm);
+    return ((FindPanelTopFn)g_findPanelTopTramp)(pm, a2, a3, a4);
+}
+
+static bool InstallPmSeedHook() {
+    if (!g_findPanelTopAddr) return false;
+    if (!DeriveFindPanelTopOffsets()) return false;
+    uintptr_t tramp = InstallHookGeneric(g_findPanelTopAddr,
+                                         (void*)&DetourFindPanelTop,
+                                         /*gameImageOnly=*/true,
+                                         &g_findPanelTopTramp);
+    if (!tramp) {
+        Log("PmSeed: hook on FindPanelTop FAILED — falling back to first-panel capture");
+        return false;
+    }
+    Log("PmSeed: FindPanelTop hook installed at base+0x%llX",
+        (unsigned long long)(g_findPanelTopAddr - g_gameBase));
+    return true;
+}
+
 // Backwards-compatible wrapper for the OpenPanel hook (writes to the
 // existing trampoline global so callers in the OpenPanel detour path keep
 // working unchanged).
@@ -1953,7 +2446,7 @@ static void OpenPanelOnGameThread(int panelIndex) {
 
     OpenPanelFunc openPanel = (OpenPanelFunc)g_openPanelAddr;
 
-    const char* panelName = g_panels[panelIndex].panelName;
+    const char* panelName = PanelNameFor(panelIndex);
     if (!panelName || panelName[0] == '\0') {
         Log("ERROR: [%s] has no PanelName — set it in the INI to enable this hotkey",
             g_panels[panelIndex].section);
@@ -2146,8 +2639,8 @@ static LRESULT CALLBACK HookedWndProc(HWND hwnd, UINT msg,
         OpenPanelOnGameThread((int)wParam);
         return 0;
     }
-    if (msg == WM_CLEAR_FLAGS) {
-        ClearMenuStateFlags();
+    if (msg == WM_CLOSE_PANEL) {
+        CloseMenuNow();
         return 0;
     }
     // Reset panel tracking when user closes a menu with ESC
@@ -2198,6 +2691,13 @@ static DWORD WINAPI NameLogThread(LPVOID) {
 static bool g_keyWasDown[32] = {};  // track previous key state per panel
 static bool g_reloadWasDown = false;
 static DWORD g_lastActionTime = 0;  // cooldown between panel switches
+static DWORD g_lastOpenTime   = 0;  // when the mod last sent an open (see OPEN_GRACE_MS)
+// Right after an open the panel's view state is still in its opening
+// transition and the game's own open-test does not report "open" yet. A
+// second press inside this window is therefore a toggle-close, not a
+// "closed outside the mod" re-open (seen on 2.02.00: J pressed 0.7 s after
+// opening reported "not on screen" and re-opened instead of closing).
+static const DWORD OPEN_GRACE_MS = 1000;
 static const DWORD PANEL_COOLDOWN_MS = 400;  // 400ms between actions
 
 // Debounce: delay plain key when modifier bindings exist on the same key
@@ -2231,7 +2731,7 @@ static bool HandlePanelAction(int i) {
     if (!IsGameplayState()) return false;
 
     if (IsModalActive()) {
-        Log("[Safety] Blocked: text modal active over PetView (mc+0xCC5=1)");
+        Log("[Safety] Blocked: a text-input modal is open");
         return false;
     }
 
@@ -2242,22 +2742,33 @@ static bool HandlePanelAction(int i) {
         return false;
     }
 
-    // Verify panel is actually still open before toggle-close.
-    // flag1 (mc+0xCC5) is non-zero when a panel is open, 0 when closed.
-    // If flag1 is 0 but we think a panel is open → game closed it → open fresh.
-    if (g_currentPanel == i && !IsPanelFlagSet()) {
-        Log("Panel '%s' was already closed by game (flag1=0), opening fresh",
-            g_panels[i].panelName);
+    // Before a toggle-close, ask the game whether the panel is really still on
+    // screen (the player may have closed it with ESC behind the mod's back).
+    // The per-panel view state is preferred; the old global flag array is only
+    // consulted when that is unavailable. With neither available the mod's own
+    // toggle state is trusted — reporting "closed" for "cannot tell" would make
+    // every press an open.
+    bool believedOpenButIsNot = false;
+    if (g_currentPanel == i && now - g_lastOpenTime >= OPEN_GRACE_MS) {
+        if (PanelOpenCheckAvailable())
+            believedOpenButIsNot = !IsPanelOpenByName(PanelNameFor(i));
+        else if (PanelFlagsAvailable())
+            believedOpenButIsNot = !IsPanelFlagSet();
+    }
+    if (believedOpenButIsNot) {
+        Log("Panel '%s' is not on screen any more (closed outside the mod) — opening fresh",
+            PanelNameFor(i));
         g_currentPanel = -1;
         g_panelConfirmedOpen = false;
     }
 
     if (g_currentPanel == i) {
-        Log("Closing panel: %s (toggle)", g_panels[i].panelName);
+        Log("Closing panel: %s (toggle)", PanelNameFor(i));
         g_currentPanel = -1;
         g_panelConfirmedOpen = false;
-        PostMessageA(g_gameWindow, WM_CLEAR_FLAGS, 0, 0);
+        PostMessageA(g_gameWindow, WM_CLOSE_PANEL, (WPARAM)i, 0);
     } else {
+        g_lastOpenTime = now;
         PostMessageA(g_gameWindow, WM_OPEN_PANEL, i, 0);
     }
     return true;
@@ -2272,10 +2783,6 @@ static DWORD WINAPI InputThread(LPVOID) {
         // Keep PanelManager fresh from global chain
         if (g_panelManager == 0 && g_pmGlobalAddr != 0)
             ReadPanelManagerFromGlobal();
-
-        // Panel close detection is now handled in HandlePanelAction via
-        // IsAnyPanelStateActive() — checks the full state-flag array (mc+0xCB8,
-        // 16 slots) instead of only flag1 (mc+0xCC5 = slot 0x0D).
 
         // Modal close detection: two paths.
         //  (1) Keyboard close (ESC / Enter): edge-detected here for instant
@@ -2577,7 +3084,7 @@ static DWORD WINAPI ModThread(LPVOID) {
         Log("BlockOverlappingInputs=0 — input-block hooks skipped");
     }
 
-    Log("=== Quick Menu Hotkeys v1.10.6 ===");
+    Log("=== Quick Menu Hotkeys v1.11.0 ===");
 
     g_gameBase = (uintptr_t)GetModuleHandleA("CrimsonDesert.exe");
     if (!g_gameBase) { Log("ERROR: CrimsonDesert.exe not found"); return 0; }
@@ -2614,12 +3121,22 @@ static DWORD WINAPI ModThread(LPVOID) {
     // either is missing, the sub-tab post-switch is skipped (panel still
     // opens at the game-default tab).
     FindSubTabHelpers();
+    ResolveQuestMenuFlag();
 
     // Install hook on OpenPanel (fallback PanelManager capture)
     if (!InstallHook(g_openPanelAddr)) {
         Log("ERROR: Hook installation failed!");
         return 0;
     }
+
+    // Recover the game's own open-test and menu-close call (replaces the
+    // menu-state flag array, unresolvable since 1.13).
+    ResolveMenuClose();
+
+    // Seed the PanelManager from FindPanelTop so the first hotkey works without
+    // the user having to open a vanilla panel first. Non-fatal: on failure the
+    // OpenPanel hook above still captures pm on the first panel interaction.
+    InstallPmSeedHook();
 
     // Install hook on TextEditModalMessage opener (FUN_140b85bf0 in 1.0.4.1).
     // Identified by the unique LEA xref to the literal "\"TextEditModalMessage\""

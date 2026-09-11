@@ -1,5 +1,13 @@
 Quick Menu Hotkeys - Changelog
 
+== v1.11.0 (2026-09-11) ==
+- Updated for game version 2.02.00 (covers the September "Enhanced" update 2.01.00 as well). Fixes the hotkeys doing nothing after the update: the panel-open function is now located precisely (after the update the old heuristic latched onto a generic lookup helper instead), and the PanelManager is captured from the game's own panel lookup so hotkeys work right after loading.
+- Fixed: pressing the hotkey again closes the panel again. The mod now calls the game's own menu-close function instead of clearing internal state bytes that 2.01 no longer has.
+- Fixed: the open/closed check now asks the game per panel, so a panel closed with ESC no longer needs an extra keypress. Modifier combos (e.g. Shift+J, Ctrl+J) verified working.
+- Fixed: pressing the hotkey again within a second of opening closes the panel instead of re-opening it (the game does not report the panel as open until its opening transition has finished).
+- Fixed: J opened the main menu on the Inventory tab instead of the Quest journal (broken since the game introduced its new quest journal). The game switches the journal panel from QuestMenuPanel to QuestMenuPanel2 behind an internal flag; the mod now reads that flag and opens the same panel the game does. A PanelName= override in [QuestBook] is still honoured as written.
+- Note: the safety gate that blocked hotkeys during cutscenes cannot read the game state on 2.01.00 and is inactive.
+
 == v1.10.6 (2026-07-08) ==
 - New: hotkeys now work immediately after loading a save — including keys the game has no native binding for (e.g. O for Options). Previously those only worked after another menu had been opened once per session.
 - Update-proof: the internal PanelManager pointer path is now derived statically from the game binary at startup (located via the FindPanelTop call-site anchor) instead of being hardcoded. It is read fresh from the game files every launch, so a future update that shifts the offsets is picked up automatically with no mod update needed. If the anchor ever fails to match, the mod falls back to learning the path from the first live menu open.
