@@ -8,7 +8,7 @@ This mod adds direct keyboard and controller shortcuts for opening Crimson Deser
 
 [line]
 
-[b]Final version.[/b] v1.11.0 for game version [b]2.02.00[/b] is the last update; the mod is no longer maintained. The complete source code is public on [url=https://github.com/Stevi2195/QuickMenuHotkeys]https://github.com/Stevi2195/QuickMenuHotkeys[/url] — anyone is welcome to pick it up and continue it.
+[b]Final version.[/b] v1.11.0 for game version [b]2.02.00[/b] is the last update; the mod is no longer maintained. The complete source code is public on [url=https://github.com/Stevi2195/QuickMenuHotkeys]https://github.com/Stevi2195/QuickMenuHotkeys[/url] — MIT-licensed, so anyone is welcome to pick it up and continue it.
 
 [line]
 
