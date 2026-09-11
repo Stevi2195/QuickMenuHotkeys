@@ -26,7 +26,7 @@ static volatile LONG g_hookCounter = 0;
 // Resolved addresses
 static uintptr_t g_openPanelAddr  = 0;
 static uintptr_t g_findPanelAddr  = 0;
-static uintptr_t g_findPanelTopAddr = 0;  // top-level panel lookup (pm[0x30ec8] array iterator)
+static uintptr_t g_findPanelTopAddr = 0;  // top-level panel lookup FindPanelTop(pm, name)
 static uintptr_t g_findPanelTopTramp = 0; // trampoline for the pm-seeding hook (see DetourFindPanelTop)
 static uint32_t  g_pmArrayOff = 0;        // pm+N: panel entry array   (read out of FindPanelTop's prolog)
 static uint32_t  g_pmCountOff = 0;        // pm+N: panel entry count
@@ -64,7 +64,7 @@ static WNDPROC g_originalWndProc = nullptr;
 
 // Toggle tracking: which panel was last opened via hotkey (-1 = none)
 static volatile int g_currentPanel = -1;
-static volatile bool g_panelConfirmedOpen = false;  // true once flag1 seen non-zero after open
+static volatile bool g_panelConfirmedOpen = false;  // the game's own open-test has reported the mod-opened panel open (set by InputThread)
 
 #define WM_OPEN_PANEL  (WM_USER + 501)
 #define WM_CLOSE_PANEL (WM_USER + 502)
@@ -138,7 +138,13 @@ static bool g_modalGate = true;
 static volatile bool      g_textModalActive = false;
 static volatile uintptr_t g_modalObj        = 0;  // Modal object captured from hook
 static volatile uintptr_t g_modalVftable    = 0;  // vftable at hook time (liveness)
+static volatile UINT      g_modalType       = 0;  // the opener's 4th argument (type id) at hook time
 static uintptr_t g_modalTrampoline = 0;
+// The opener stores its 4th argument into *(modal + g_modalSubOff) + g_modalTypeOff
+// (2.01/2.02: +0x148 / +0xEC). Both are read out of the opener's code at boot
+// (ResolveModalProbeOffsets); 0 = unresolved, liveness then uses the vftable only.
+static uint32_t g_modalSubOff  = 0;
+static uint32_t g_modalTypeOff = 0;
 
 // OpenPanel detour: trampoline to original function
 static uintptr_t g_openPanelTrampoline = 0;
@@ -694,14 +700,15 @@ static bool ReadPanelState(const char* panelName, BYTE* out) {
 // quest panel's own object never does (it reads 0x90 while visibly open on
 // 2.02.00). So the container counts too: if the panel's own byte does not say
 // "open" but MainMenuView2 is open, the panel is treated as open.
-static bool IsPanelOpenByName(const char* panelName) {
+static bool IsPanelOpenByName(const char* panelName, bool quiet = false) {
     BYTE st = 0;
     if (!ReadPanelState(panelName, &st)) return false;
     if ((st & 0x60) == 0x40) return true;
     BYTE mm = 0;
     bool mmOpen = ReadPanelState("MainMenuView2", &mm) && (mm & 0x60) == 0x40;
-    Log("Panel '%s' state byte +0x%X = 0x%02X, MainMenuView2 = 0x%02X -> %s",
-        panelName, g_panelStateOff, st, mm, mmOpen ? "open (via container)" : "not open");
+    if (!quiet)
+        Log("Panel '%s' state byte +0x%X = 0x%02X, MainMenuView2 = 0x%02X -> %s",
+            panelName, g_panelStateOff, st, mm, mmOpen ? "open (via container)" : "not open");
     return mmOpen;
 }
 
@@ -756,9 +763,9 @@ static bool IsPanelFlagSet() {
     return false;
 }
 
-// Detour for the TextEditModalMessage open function (FUN_140b85bf0 in
-// build 1.0.4.1, identified via "TextEditModalMessage" string xref). Calls
-// original, then sets g_textModalActive when the modal was created.
+// Detour for the TextEditModalMessage open function (identified via the
+// "TextEditModalMessage" string xref). Calls the original, then sets
+// g_textModalActive when the modal was created.
 typedef LONGLONG* (__fastcall *TextEditModalFn)(LONGLONG, LONGLONG, LONGLONG, UINT);
 
 static LONGLONG* __fastcall DetourTextEditModal(LONGLONG p1, LONGLONG p2,
@@ -772,6 +779,7 @@ static LONGLONG* __fastcall DetourTextEditModal(LONGLONG p1, LONGLONG p2,
         } __except(EXCEPTION_EXECUTE_HANDLER) {
             g_modalVftable = 0;
         }
+        g_modalType = p4;
         g_modalObj = (uintptr_t)result;
         g_textModalActive = true;
         Log("[ModalHook] TextEdit modal opened (obj=0x%p, vft=0x%llX)",
@@ -786,18 +794,74 @@ static LONGLONG* __fastcall DetourTextEditModal(LONGLONG p1, LONGLONG p2,
 //
 // Two-tier check:
 //  1. vftable still equals what we captured at hook time → object likely alive
-//  2. state field at *(obj + 0x140) + 0xd4 still == 0xf (set by the opener
-//     to mark TextEdit type; reset/freed when the modal is destroyed)
+//  2. the type field the opener wrote (*(obj + g_modalSubOff) + g_modalTypeOff,
+//     see ResolveModalProbeOffsets) still holds the value it was given at
+//     hook time; reset/freed when the modal is destroyed. Skipped when the
+//     offsets could not be derived from the opener.
 // Either failure → flag cleared.
 static bool ProbeModalAlive() {
     if (g_modalObj == 0 || g_modalVftable == 0) return false;
     __try {
         if (*(uintptr_t*)g_modalObj != g_modalVftable) return false;
-        uintptr_t sub = *(uintptr_t*)(g_modalObj + 0x140);
+        if (!g_modalSubOff || !g_modalTypeOff) return true;
+        uintptr_t sub = *(uintptr_t*)(g_modalObj + g_modalSubOff);
         if (!sub) return false;
-        return *(int*)(sub + 0xd4) == 0xf;
+        return *(UINT*)(sub + g_modalTypeOff) == g_modalType;
     } __except(EXCEPTION_EXECUTE_HANDLER) {}
     return false;
+}
+
+// The opener keeps its 4th argument (the modal type id) in a 32-bit register
+// and stores it into a sub-object of the modal it returns:
+//     mov  ebp, r9d                     ; 41 8B E9   (any register)
+//     ...
+//     mov  rdi, [rbx + SUB]             ; 48 8B BB <disp32>   (rbx = modal)
+//     test rdi, rdi / je
+//     mov  [rdi + TYPE], ebp            ; 89 AF <disp32>
+// (2.01.00 decompile: modal[0x29] -> +0x148, then +0xEC = param_4; 2.02.00
+// disassembly identical.) Find the store through the register that received
+// R9D, then the load that produced its base register.
+static void ResolveModalProbeOffsets(uintptr_t fn) {
+    const BYTE* f = (const BYTE*)fn;
+    const int WIN = 0x400;
+    int dstReg = -1;
+    __try {
+        for (int i = 0; i + 3 < WIN && dstReg < 0; i++) {
+            // mov r32, r9d  = 41 8B modrm(mod=11, rm=001)  -> dst = reg field
+            if (f[i] == 0x41 && f[i+1] == 0x8B && (f[i+2] & 0xC7) == 0xC1) dstReg = (f[i+2] >> 3) & 7;
+            // mov r32, r9d  = 44 89 modrm(mod=11, reg=001) -> dst = rm field
+            else if (f[i] == 0x44 && f[i+1] == 0x89 && (f[i+2] & 0xF8) == 0xC8) dstReg = f[i+2] & 7;
+        }
+        if (dstReg < 0) { Log("ModalProbe: no R9D copy in the opener — liveness by vftable only"); return; }
+        for (int i = 0; i + 6 < WIN; i++) {
+            // mov [base + disp32], r32(dstReg): optional REX (no W), 89, modrm mod=10
+            int k = i; BYTE rex = 0;
+            if (f[k] >= 0x40 && f[k] <= 0x47) rex = f[k++];
+            if (f[k] != 0x89) continue;
+            BYTE m = f[k+1];
+            if ((m & 0xC0) != 0x80 || (m & 7) == 4) continue;
+            if ((((rex >> 2) & 1) << 3 | ((m >> 3) & 7)) != dstReg) continue;
+            uint32_t typeOff = *(const uint32_t*)(f + k + 2);
+            if (typeOff < 0x10 || typeOff > 0x1000) continue;
+            int baseReg = ((rex & 1) << 3) | (m & 7);
+            // walk back for  mov r64(baseReg), [r64 + disp32]
+            for (int b = 7; b <= 0x20 && b <= k; b++) {
+                const BYTE* q = f + k - b;
+                if (q[0] != 0x48 && q[0] != 0x4C && q[0] != 0x49 && q[0] != 0x4D) continue;
+                if (q[1] != 0x8B) continue;
+                BYTE m2 = q[2];
+                if ((m2 & 0xC0) != 0x80 || (m2 & 7) == 4) continue;
+                if (((((q[0] >> 2) & 1) << 3) | ((m2 >> 3) & 7)) != baseReg) continue;
+                uint32_t subOff = *(const uint32_t*)(q + 3);
+                if (subOff < 0x10 || subOff > 0x1000) continue;
+                g_modalSubOff = subOff; g_modalTypeOff = typeOff;
+                Log("ModalProbe: type field at *(modal+0x%X)+0x%X (opener+0x%X)",
+                    subOff, typeOff, (unsigned)(k - b));
+                return;
+            }
+        }
+    } __except(EXCEPTION_EXECUTE_HANDLER) {}
+    Log("ModalProbe: store pattern not found in the opener — liveness by vftable only");
 }
 
 static bool IsModalActive() {
@@ -809,14 +873,17 @@ static bool IsModalActive() {
 //  Pattern Scanner
 // ============================================================
 
+// First occurrence of the NUL-terminated string that also STARTS a string
+// (preceded by a NUL). A tail match ("QuestMenuPanel" inside
+// "DailyQuestMenuPanel") has no code reference of its own — it cost the
+// precise resolver its QuestMenuPanel probe (3/4 instead of 4/4).
 static uintptr_t FindString(const char* str) {
     BYTE* base = (BYTE*)g_gameBase;
     int len = (int)strlen(str);
     for (DWORD i = 0; i + len + 1 < g_imageSize; i++) {
-        if (base[i] == (BYTE)str[0] &&
-            memcmp(base + i, str, len + 1) == 0) {
+        if (base[i] != (BYTE)str[0] || (i && base[i - 1] != 0)) continue;
+        if (memcmp(base + i, str, len + 1) == 0)
             return (uintptr_t)(base + i);
-        }
     }
     return 0;
 }
@@ -1254,13 +1321,6 @@ static bool FindSubTabHelpers() {
 //  PanelManager Global Pointer Chain Scanner
 // ============================================================
 
-// Scans callers of FindPanel for the pattern:
-//   MOV RCX, [rip+disp32]   ; 48 8B 0D xx xx xx xx  (load global)
-//   MOV reg, [RCX+off1]     ; 48 8B xx xx            (first offset)
-//   MOV reg, [reg+off2]     ; 48 8B xx xx            (second offset)
-//   MOV RCX, [RCX]          ; 48 8B 09               (final deref)
-//   CALL FindPanel           ; E8 xx xx xx xx
-
 // Scan for menu state flag offsets by finding two consecutive
 // MOV BYTE PTR [reg+disp32], 0 instructions near a "LogoutView" reference.
 // Known pattern: C6 xx CC_0C_00_00 00  C6 xx BC_0C_00_00 00
@@ -1497,6 +1557,11 @@ static int DecodeModRM(BYTE* op, int baseLen) {
 }
 
 static int InstrLen(BYTE* ip) {
+    // FF 25 00000000 + qword: an inline absolute JMP, i.e. another mod's hook
+    // on the same function. Position independent (the target travels with
+    // it), so it is stolen as one unit.
+    if (ip[0] == 0xFF && ip[1] == 0x25 && *(int32_t*)(ip + 2) == 0) return 14;
+
     // Operand-size prefix (0x66) — most commonly seen here as `66 90` (2-byte
     // NOP for alignment padding before a function body). Returns its own
     // length and lets the caller call InstrLen on the next byte if it isn't
@@ -2185,6 +2250,15 @@ static uintptr_t InstallHookGeneric(uintptr_t targetAddr, void* detourFn,
             uintptr_t realTarget = 0;
             if (target[0] == 0xFF && target[1] == 0x25) {
                 int32_t disp = *(int32_t*)(target + 2);
+                // disp32 = 0 is an inline absolute JMP: another mod's hook
+                // (PrivateStorageAnywhere hooks FindPanelTop this way). Do
+                // not follow it — the 14 bytes are stolen as one unit and
+                // the trampoline chains into the other mod's hook.
+                if (disp == 0) {
+                    Log("Target base+0x%llX carries another mod's hook — chaining on top of it",
+                        (unsigned long long)(targetAddr - g_gameBase));
+                    break;
+                }
                 uintptr_t ptrLoc = targetAddr + 6 + disp;
                 realTarget = *(uintptr_t*)ptrLoc;
             } else if (target[0] == 0xE9) {
@@ -2231,6 +2305,7 @@ static uintptr_t InstallHookGeneric(uintptr_t targetAddr, void* detourFn,
     // uses RIP-relative addressing in x64 mode.
     for (int j = 0; j < stolenLen; ) {
         BYTE* ip = stolenBytes + j;
+        if (ip[0] == 0xFF && ip[1] == 0x25 && *(int32_t*)(ip + 2) == 0) { j += 14; continue; }
         bool hasRex = (ip[0] >= 0x40 && ip[0] <= 0x4F);
         BYTE* op = hasRex ? ip + 1 : ip;
         int modrmOffset = 1;  // ModRM byte position after opcode
@@ -2338,21 +2413,40 @@ static uintptr_t InstallHookGeneric(uintptr_t targetAddr, void* detourFn,
 // FindPanelTop opens with two  MOV reg,[RCX+disp32]  loads: the entry array and
 // the entry count. Pick the first two such loads with a struct-sized
 // displacement, in address order.
+static int CollectRcxDisp32Loads(const BYTE* fn, int len, uint32_t* out, int n, int max) {
+    __try {
+        for (int i = 0; i + 6 < len && n < max; i++) {
+            // 8B /r with mod=10, rm=001 (RCX base, disp32); optional REX.W/R prefix.
+            int k = i;
+            if (fn[k] == 0x48 || fn[k] == 0x4C || fn[k] == 0x49 || fn[k] == 0x4D) k++;
+            if (fn[k] != 0x8B) continue;
+            if ((fn[k + 1] & 0xC7) != 0x81) continue;
+            uint32_t disp = *(const uint32_t*)(fn + k + 2);
+            if (disp < 0x1000 || disp > 0x100000) continue;
+            bool dup = false;
+            for (int j = 0; j < n; j++) if (out[j] == disp) dup = true;
+            if (!dup) out[n++] = disp;
+            i = k + 5;
+        }
+    } __except(EXCEPTION_EXECUTE_HANDLER) {}
+    return n;
+}
+
 static bool DeriveFindPanelTopOffsets() {
     if (!g_findPanelTopAddr) return false;
     const BYTE* fn = (const BYTE*)g_findPanelTopAddr;
     uint32_t found[2] = {0, 0};
     int n = 0;
-    for (int i = 0; i < 0x40 && n < 2; i++) {
-        // 8B /r with mod=10, rm=001 (RCX base, disp32); optional REX.W/R prefix.
-        int k = i;
-        if (fn[k] == 0x48 || fn[k] == 0x4C || fn[k] == 0x49 || fn[k] == 0x4D) k++;
-        if (fn[k] != 0x8B) continue;
-        if ((fn[k + 1] & 0xC7) != 0x81) continue;
-        uint32_t disp = *(const uint32_t*)(fn + k + 2);
-        if (disp < 0x1000 || disp > 0x100000) continue;
-        found[n++] = disp;
-        i = k + 5;
+    // Another mod (PrivateStorageAnywhere reads pm the same way) may already
+    // have its JMP on the prolog; the stolen bytes then live in ITS
+    // trampoline, so read them from there and continue behind the JMP.
+    if (fn[0] == 0xFF && fn[1] == 0x25 && *(const int32_t*)(fn + 2) == 0) {
+        const BYTE* tramp = *(const BYTE* const*)(fn + 6);
+        n = CollectRcxDisp32Loads(tramp, 0x100, found, n, 2);
+        n = CollectRcxDisp32Loads(fn + 14, 0x40 - 14, found, n, 2);
+        Log("PmSeed: FindPanelTop already hooked by another mod — prolog read via its trampoline");
+    } else {
+        n = CollectRcxDisp32Loads(fn, 0x40, found, n, 2);
     }
     if (n < 2) {
         Log("PmSeed: FindPanelTop prolog offsets not derivable (%d found) — seeding disabled", n);
@@ -2568,12 +2662,12 @@ static void OpenPanelOnGameThread(int panelIndex) {
             (unsigned long long)subList, subCount);
         if (!subList || subCount == 0) { Log("Sub-tab: subList null or empty"); return; }
 
-        // Same dual name-resolution as FUN_140abf8e0:
-        //   if state+0xa8 set AND *(state+0xa8 + 8) set -> vtable lookup
-        //     name = FUN_14354e240(*(state+0x60))   (g_gameBase + 0x354e240)
-        //   else                                    -> name = *(state+0x180)
-        typedef const char* (__fastcall* GetNameVtFunc)(LONGLONG);
-        GetNameVtFunc getNameVt = (GetNameVtFunc)(g_gameBase + 0x354e240);
+        // OpenPanel resolves a sub-tab's name two ways: through a game
+        // function when state+0xa8/+8 is set, else from *(state+0x180). The
+        // function address is not resolved dynamically, so entries that need
+        // it are skipped rather than called through a stale address.
+        // (These struct offsets date from 1.06 and only matter when SetSubTab
+        // resolves; on 2.01/2.02 it does not, so this loop never runs.)
 
         int targetIdx = -1;
         Log("Sub-tab: entering loop, subCount=%u", subCount);
@@ -2592,12 +2686,8 @@ static void OpenPanelOnGameThread(int panelIndex) {
             const char* subName = nullptr;
             uintptr_t a8 = *(uintptr_t*)(subState + 0xa8);
             bool useVt = (a8 != 0 && *(uintptr_t*)(a8 + 8) != 0);
-            if (useVt) {
-                LONGLONG arg = *(LONGLONG*)(subState + 0x60);
-                subName = getNameVt(arg);
-            } else {
-                subName = *(const char**)(subState + 0x180);
-            }
+            if (useVt) continue;                       // name needs an unresolved game function
+            subName = *(const char**)(subState + 0x180);
             if (!subName) continue;
             if (strcmp(subName, panelName) != 0) continue;
 
@@ -2691,14 +2781,7 @@ static DWORD WINAPI NameLogThread(LPVOID) {
 static bool g_keyWasDown[32] = {};  // track previous key state per panel
 static bool g_reloadWasDown = false;
 static DWORD g_lastActionTime = 0;  // cooldown between panel switches
-static DWORD g_lastOpenTime   = 0;  // when the mod last sent an open (see OPEN_GRACE_MS)
-// Right after an open the panel's view state is still in its opening
-// transition and the game's own open-test does not report "open" yet. A
-// second press inside this window is therefore a toggle-close, not a
-// "closed outside the mod" re-open (seen on 2.02.00: J pressed 0.7 s after
-// opening reported "not on screen" and re-opened instead of closing).
-static const DWORD OPEN_GRACE_MS = 1000;
-static const DWORD PANEL_COOLDOWN_MS = 400;  // 400ms between actions
+static const DWORD PANEL_COOLDOWN_MS = 400;  // input cooldown between actions (double inputs)
 
 // Debounce: delay plain key when modifier bindings exist on the same key
 static int   g_pendingPanel = -1;
@@ -2744,16 +2827,22 @@ static bool HandlePanelAction(int i) {
 
     // Before a toggle-close, ask the game whether the panel is really still on
     // screen (the player may have closed it with ESC behind the mod's back).
-    // The per-panel view state is preferred; the old global flag array is only
-    // consulted when that is unavailable. With neither available the mod's own
-    // toggle state is trusted — reporting "closed" for "cannot tell" would make
-    // every press an open.
+    // Right after the mod's own open the view is still in its opening
+    // transition and the open-test does not report "open" yet (seen on
+    // 2.02.00: a press 0.7 s after opening read "not on screen"), so the test
+    // is only consulted once InputThread has seen the panel open — an event,
+    // not a timer. The per-panel view state is preferred; the old global flag
+    // array is only consulted when that is unavailable. With neither available
+    // the mod's own toggle state is trusted — reporting "closed" for "cannot
+    // tell" would make every press an open.
     bool believedOpenButIsNot = false;
-    if (g_currentPanel == i && now - g_lastOpenTime >= OPEN_GRACE_MS) {
-        if (PanelOpenCheckAvailable())
-            believedOpenButIsNot = !IsPanelOpenByName(PanelNameFor(i));
-        else if (PanelFlagsAvailable())
+    if (g_currentPanel == i) {
+        if (PanelOpenCheckAvailable()) {
+            if (g_panelConfirmedOpen)
+                believedOpenButIsNot = !IsPanelOpenByName(PanelNameFor(i));
+        } else if (PanelFlagsAvailable()) {
             believedOpenButIsNot = !IsPanelFlagSet();
+        }
     }
     if (believedOpenButIsNot) {
         Log("Panel '%s' is not on screen any more (closed outside the mod) — opening fresh",
@@ -2768,7 +2857,7 @@ static bool HandlePanelAction(int i) {
         g_panelConfirmedOpen = false;
         PostMessageA(g_gameWindow, WM_CLOSE_PANEL, (WPARAM)i, 0);
     } else {
-        g_lastOpenTime = now;
+        g_panelConfirmedOpen = false;
         PostMessageA(g_gameWindow, WM_OPEN_PANEL, i, 0);
     }
     return true;
@@ -2783,6 +2872,14 @@ static DWORD WINAPI InputThread(LPVOID) {
         // Keep PanelManager fresh from global chain
         if (g_panelManager == 0 && g_pmGlobalAddr != 0)
             ReadPanelManagerFromGlobal();
+
+        // Confirm a mod-opened panel once the game's own open-test reports it
+        // open; from then on a close behind the mod's back is detectable.
+        if (g_currentPanel >= 0 && !g_panelConfirmedOpen && PanelOpenCheckAvailable() &&
+            IsPanelOpenByName(PanelNameFor(g_currentPanel), true)) {
+            g_panelConfirmedOpen = true;
+            Log("Panel '%s' confirmed open", PanelNameFor(g_currentPanel));
+        }
 
         // Modal close detection: two paths.
         //  (1) Keyboard close (ESC / Enter): edge-detected here for instant
@@ -3097,13 +3194,16 @@ static DWORD WINAPI ModThread(LPVOID) {
 
     // Hash meta/0.papgt to detect modded game files (JSON mods etc.)
     {
+        // Game root = everything before "\bin64\" (the DLL sits in bin64\Plugins).
         std::string metaPath(dllPath);
-        size_t bs = metaPath.rfind('\\');
-        if (bs != std::string::npos) {
-            metaPath = metaPath.substr(0, bs);           // strip filename
+        size_t bin64pos = metaPath.rfind("\\bin64\\");
+        if (bin64pos != std::string::npos) {
+            metaPath = metaPath.substr(0, bin64pos);
+        } else {
+            size_t bs = metaPath.rfind('\\');
+            if (bs != std::string::npos) metaPath = metaPath.substr(0, bs);
             bs = metaPath.rfind('\\');
-            if (bs != std::string::npos)
-                metaPath = metaPath.substr(0, bs);       // strip bin64
+            if (bs != std::string::npos) metaPath = metaPath.substr(0, bs);
         }
         metaPath += "\\meta\\0.papgt";
         uint32_t crc = FileCRC32(metaPath.c_str());
@@ -3138,9 +3238,9 @@ static DWORD WINAPI ModThread(LPVOID) {
     // OpenPanel hook above still captures pm on the first panel interaction.
     InstallPmSeedHook();
 
-    // Install hook on TextEditModalMessage opener (FUN_140b85bf0 in 1.0.4.1).
-    // Identified by the unique LEA xref to the literal "\"TextEditModalMessage\""
-    // string. Failure is non-fatal — just disables the modal gate and logs.
+    // Install hook on the TextEditModalMessage opener, identified by the LEA
+    // xref to the "TextEditModalMessage" string. Failure is non-fatal — just
+    // disables the modal gate and logs.
     {
         uintptr_t modalStrAddr = FindString("TextEditModalMessage");
         if (!modalStrAddr) {
@@ -3160,6 +3260,7 @@ static DWORD WINAPI ModThread(LPVOID) {
                     Log("TextEditModalMessage opener resolved at base+0x%llX (LEA at base+0x%llX)",
                         (unsigned long long)(modalFn - g_gameBase),
                         (unsigned long long)(modalLea - g_gameBase));
+                    ResolveModalProbeOffsets(modalFn);
                     g_modalTrampoline = InstallHookGeneric(modalFn, (void*)&DetourTextEditModal);
                     if (!g_modalTrampoline) {
                         Log("WARNING: modal hook install failed — modal gate disabled");

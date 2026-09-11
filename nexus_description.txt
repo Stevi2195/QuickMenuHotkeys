@@ -8,6 +8,10 @@ This mod adds direct keyboard and controller shortcuts for opening Crimson Deser
 
 [line]
 
+[b]Final version.[/b] v1.11.0 for game version [b]2.02.00[/b] is the last update; the mod is no longer maintained. The complete source code is public on [url=https://github.com/Stevi2195/QuickMenuHotkeys]https://github.com/Stevi2195/QuickMenuHotkeys[/url] — anyone is welcome to pick it up and continue it.
+
+[line]
+
 [size=3][b]Default Hotkeys[/b][/size]
 
 [list]
@@ -187,10 +191,7 @@ Delete [b]QuickMenuHotkeys.asi[/b] and [b]QuickMenuHotkeys.ini[/b] from the game
 
 [b]v1.11.0[/b]
 [list]
-[*]Updated for game version [b]2.02.00[/b] (covers the September "Enhanced" update 2.01.00 as well). Fixes the hotkeys doing nothing after the update.
-[*][b]Fixed:[/b] pressing the hotkey again closes the panel again — the mod now calls the game's own menu-close function.
-[*][b]Fixed:[/b] the open/closed check asks the game per panel, so a panel closed with ESC no longer needs an extra keypress.
-[*][b]Fixed:[/b] [b]J[/b] opened the main menu on the Inventory tab instead of the Quest journal (broken since the game introduced its new quest journal). The mod now opens the same journal panel the game does.
+[*]Update for game version [b]2.02.00[/b]. Final version — the source code is published on GitHub.
 [/list]
 
 [b]v1.10.6[/b]

@@ -3,7 +3,7 @@ Copy the line(s) below the version number when uploading that file version.
 =======================================================================
 
 v1.11.0
-Updated for game 2.02.00. Fixes hotkeys doing nothing and panels not closing after the update, and J opening the Inventory instead of the new Quest journal. Panels now close through the game's own menu-close call.
+Update for game 2.02.00. Final version — the mod is no longer maintained. The source code is public on GitHub (github.com/Stevi2195/QuickMenuHotkeys).
 
 v1.10.6
 Hotkeys now work right after loading a save — including keys the game doesn't know natively (e.g. O for Options). The mod reads the internal pointer path from the game files each launch, so updates that shift it are handled automatically.
