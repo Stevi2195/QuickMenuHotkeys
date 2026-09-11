@@ -875,8 +875,9 @@ static bool IsModalActive() {
 
 // First occurrence of the NUL-terminated string that also STARTS a string
 // (preceded by a NUL). A tail match ("QuestMenuPanel" inside
-// "DailyQuestMenuPanel") has no code reference of its own — it cost the
-// precise resolver its QuestMenuPanel probe (3/4 instead of 4/4).
+// "DailyQuestMenuPanel") has no code reference of its own. (The precise
+// resolver's QuestMenuPanel probe still scores 0: the game builds that name at
+// runtime, see ResolveQuestMenuFlag, so no LEA of it feeds OpenPanel directly.)
 static uintptr_t FindString(const char* str) {
     BYTE* base = (BYTE*)g_gameBase;
     int len = (int)strlen(str);
@@ -1000,8 +1001,8 @@ static bool FindOpenPanelPrecise() {
         Log("Precise resolver: no clear FindPanelTop (best %d votes)", topVotes);
         return false;
     }
-    Log("Precise resolver: FindPanelTop = base+0x%llX (%d/%d MainMenuView2 sites)",
-        (unsigned long long)(panelTop - g_gameBase), topVotes, nc ? nc : 1);
+    Log("Precise resolver: FindPanelTop = base+0x%llX (%d MainMenuView2 sites agree, %d candidate(s))",
+        (unsigned long long)(panelTop - g_gameBase), topVotes, nc);
 
     // --- 2) OpenPanel: MainMenuView2-carrying function called with panel names ---
     uintptr_t owners[MAXC] = {};
